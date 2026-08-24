@@ -87,6 +87,10 @@ export class NotistTextView extends TextFileView {
 					this.editableCompartment.of(
 						vimMode ? NotistTextView.vimNonEditable : [],
 					),
+					// Visual-block mode (C-v) and vim multi-cursor need CM
+					// multi-selection; CM defaults to a single range and
+					// would silently clip per-line block selections.
+					EditorState.allowMultipleSelections.of(true),
 					lineNumbers(),
 					highlightActiveLineGutter(),
 					highlightActiveLine(),

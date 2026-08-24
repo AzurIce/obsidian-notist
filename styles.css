@@ -75,7 +75,8 @@ input.notist-title {
 	border: none;
 	background: transparent;
 	box-shadow: none;
-	padding: var(--size-4-4) var(--size-4-4) 0;
+	/* Bottom padding mirrors the markdown inline title's gap above the body. */
+	padding: var(--size-4-4);
 	font-size: var(--inline-title-size, var(--h1-size));
 	font-weight: var(--inline-title-weight, var(--h1-weight));
 	line-height: var(--line-height-tight);
@@ -88,22 +89,93 @@ input.notist-title:focus {
 	border: none;
 }
 
-textarea.notist-editor {
+/* CodeMirror editor: wrapper fills the view, CM itself is styled via
+   Obsidian's theme variables so it blends in like the markdown editor.
+   Aim for Zed-like restraint: barely-there highlights, quiet gutter. */
+
+.notist-editor {
 	flex: 1 1 auto;
 	min-height: 0;
-	width: 100%;
-	border: none;
-	resize: none;
-	padding: var(--size-4-2) var(--size-4-4);
-	background-color: var(--background-primary);
-	color: var(--text-normal);
+}
+
+.notist-editor .cm-editor {
+	height: 100%;
+	background: transparent;
+}
+
+.notist-editor .cm-editor.cm-focused {
+	outline: none;
+}
+
+.notist-editor .cm-scroller {
 	font-family: var(--font-monospace);
 	font-size: var(--font-text-size);
 	line-height: var(--line-height-normal);
 }
 
-textarea.notist-editor:focus {
-	outline: none;
-	box-shadow: none;
+/* Horizontal padding lives on .cm-line (not .cm-content) so the active-line
+   background covers it — otherwise a gap shows between gutter and text. */
+.notist-editor .cm-content {
+	padding: var(--size-4-2) 0;
+	caret-color: var(--text-accent);
+}
+
+.notist-editor .cm-line {
+	padding: 0 var(--size-4-4);
+}
+
+/* Quiet gutter: smaller, faint numbers, no background of its own. */
+.notist-editor .cm-gutters {
+	background-color: transparent;
 	border: none;
+	color: var(--text-faint);
+	font-size: 0.85em;
+	user-select: none;
+}
+
+.notist-editor .cm-lineNumbers .cm-gutterElement {
+	min-width: 3ch;
+	padding: 0 var(--size-4-2) 0 var(--size-4-4);
+}
+
+/* Current line: one continuous band across gutter and text (Zed-style). */
+.notist-editor {
+	--notist-active-line: color-mix(
+		in srgb,
+		var(--background-modifier-hover) 40%,
+		transparent
+	);
+}
+
+.notist-editor .cm-activeLineGutter {
+	background-color: var(--notist-active-line);
+	color: var(--text-muted);
+}
+
+.notist-editor .cm-activeLine {
+	background-color: var(--notist-active-line);
+}
+
+/* Native selection (no drawSelection extension): tinted accent. */
+.notist-editor .cm-content ::selection,
+.notist-editor .cm-content ::-moz-selection {
+	background-color: color-mix(
+		in srgb,
+		var(--interactive-accent) 25%,
+		transparent
+	);
+}
+
+/* Vim normal-mode block cursor: solid accent with inverted text. The vim
+   extension ships a Prec.highest theme that is injected after plugin styles,
+   so these need `!important` to win. */
+.notist-editor .cm-editor .cm-fat-cursor {
+	background-color: var(--interactive-accent) !important;
+	color: var(--text-on-accent) !important;
+}
+
+.notist-editor .cm-editor:not(.cm-focused) .cm-fat-cursor {
+	background-color: transparent !important;
+	outline: 1px solid var(--interactive-accent) !important;
+	color: var(--text-normal) !important;
 }

@@ -14,6 +14,17 @@ export class NotistSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
+			.setName("Vim keybindings")
+			.setDesc("Enable vim keybindings in the .not editor.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.data.vimMode)
+					.onChange(async (value) => {
+						await this.plugin.setVimMode(value);
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Ribbon icons kept in Notist world")
 			.setDesc(
 				"One aria-label per line (hover a ribbon icon to see its label). " +

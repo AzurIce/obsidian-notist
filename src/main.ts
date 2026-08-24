@@ -14,6 +14,8 @@ interface NotistPluginData {
 	ribbonKeep: string[];
 	/** Per-world workspace layout snapshots (same format as the Workspaces core plugin). */
 	layouts: Partial<Record<World, unknown>>;
+	/** Vim keybindings in the .not editor. */
+	vimMode: boolean;
 }
 
 const TOGGLE_RIBBON_LABEL = "Toggle world (Markdown / Notist)";
@@ -22,6 +24,7 @@ const DEFAULT_DATA: NotistPluginData = {
 	world: "md",
 	ribbonKeep: [TOGGLE_RIBBON_LABEL],
 	layouts: {},
+	vimMode: false,
 };
 
 export default class NotistPlugin extends Plugin {
@@ -34,7 +37,7 @@ export default class NotistPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadPluginData();
 
-		this.registerView(VIEW_TYPE_NOTIST, (leaf) => new NotistTextView(leaf));
+		this.registerView(VIEW_TYPE_NOTIST, (leaf) => new NotistTextView(leaf, this));
 		this.registerView(
 			VIEW_TYPE_NOTIST_EXPLORER,
 			(leaf) => new NotistExplorerView(leaf),
@@ -118,6 +121,15 @@ export default class NotistPlugin extends Plugin {
 
 	async savePluginData(): Promise<void> {
 		await this.saveData(this.data);
+	}
+
+	/** Persist the vim-mode flag and reconfigure every open .not editor. */
+	async setVimMode(enabled: boolean): Promise<void> {
+		this.data.vimMode = enabled;
+		await this.savePluginData();
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+			if (leaf.view instanceof NotistTextView) leaf.view.setVimMode(enabled);
+		}
 	}
 
 	/** Tag allowlisted ribbon icons with .notist-ribbon-keep; CSS hides the rest in Notist world. */

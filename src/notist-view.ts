@@ -1,17 +1,37 @@
 import { Notice, TFile, TextFileView, WorkspaceLeaf } from "obsidian";
+import { Compartment, EditorState } from "@codemirror/state";
+import {
+	EditorView,
+	highlightActiveLine,
+	highlightActiveLineGutter,
+	keymap,
+	lineNumbers,
+} from "@codemirror/view";
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { vim } from "@replit/codemirror-vim";
+import type NotistPlugin from "./main";
 
 export const VIEW_TYPE_NOTIST = "notist-view";
 
 /**
- * Plain-text editor for .not files.
- * Intentionally minimal: no notist parser/LSP yet, just bytes in a textarea.
+ * Plain-text editor for .not files, backed by a minimal CodeMirror 6
+ * (line numbers, soft wrap, history; Obsidian provides the CM runtime).
+ * Intentionally minimal: no notist parser/LSP yet.
  * Has an inline title (like the markdown view) that renames the file.
+ * Vim keybindings are optional (plugin setting), toggled live via a
+ * Compartment so open editors pick the change up without a reload.
  */
 export class NotistTextView extends TextFileView {
 	private titleInputEl: HTMLInputElement | null = null;
-	private editorEl: HTMLTextAreaElement | null = null;
+	private editorView: EditorView | null = null;
+	/** Suppresses requestSave while setViewData is replacing the doc. */
+	private settingData = false;
+	private vimCompartment = new Compartment();
 
-	constructor(leaf: WorkspaceLeaf) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		private plugin: NotistPlugin,
+	) {
 		super(leaf);
 	}
 
@@ -42,11 +62,28 @@ export class NotistTextView extends TextFileView {
 		});
 		this.titleInputEl.addEventListener("blur", () => void this.commitTitle());
 
-		this.editorEl = this.contentEl.createEl("textarea", {
-			cls: "notist-editor",
+		const editorWrapEl = this.contentEl.createDiv("notist-editor");
+		this.editorView = new EditorView({
+			parent: editorWrapEl,
+			state: EditorState.create({
+				extensions: [
+					// vim() must precede the other keymaps so its bindings win.
+					this.vimCompartment.of(
+						this.plugin.data.vimMode ? vim() : [],
+					),
+					lineNumbers(),
+					highlightActiveLineGutter(),
+					highlightActiveLine(),
+					history(),
+					keymap.of([...defaultKeymap, ...historyKeymap]),
+					EditorView.lineWrapping,
+					EditorView.contentAttributes.of({ spellcheck: "false" }),
+					EditorView.updateListener.of((update) => {
+						if (update.docChanged && !this.settingData) this.requestSave();
+					}),
+				],
+			}),
 		});
-		this.editorEl.spellcheck = false;
-		this.editorEl.addEventListener("input", () => this.requestSave());
 
 		this.registerEvent(
 			this.app.vault.on("rename", (file) => {
@@ -56,15 +93,23 @@ export class NotistTextView extends TextFileView {
 	}
 
 	async onClose(): Promise<void> {
+		this.editorView?.destroy();
+		this.editorView = null;
 		this.contentEl.empty();
 		this.titleInputEl = null;
-		this.editorEl = null;
 	}
 
 	/** Focus the inline title with the basename selected (post-create rename UX). */
 	startRename(): void {
 		this.titleInputEl?.focus();
 		this.titleInputEl?.select();
+	}
+
+	/** Toggle vim keybindings live (called from the settings tab). */
+	setVimMode(enabled: boolean): void {
+		this.editorView?.dispatch({
+			effects: this.vimCompartment.reconfigure(enabled ? vim() : []),
+		});
 	}
 
 	private syncTitle(): void {
@@ -90,15 +135,22 @@ export class NotistTextView extends TextFileView {
 	}
 
 	getViewData(): string {
-		return this.editorEl?.value ?? "";
+		return this.editorView?.state.doc.toString() ?? "";
 	}
 
 	setViewData(data: string, _clear: boolean): void {
-		if (this.editorEl) this.editorEl.value = data;
+		const view = this.editorView;
+		if (view && data !== view.state.doc.toString()) {
+			this.settingData = true;
+			view.dispatch({
+				changes: { from: 0, to: view.state.doc.length, insert: data },
+			});
+			this.settingData = false;
+		}
 		this.syncTitle();
 	}
 
 	clear(): void {
-		if (this.editorEl) this.editorEl.value = "";
+		this.setViewData("", true);
 	}
 }

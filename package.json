@@ -10,6 +10,11 @@
 		"sync": "bun run build && bun run scripts/install.ts"
 	},
 	"devDependencies": {
+		"@codemirror/commands": "^6.11.0",
+		"@codemirror/language": "^6.12.4",
+		"@codemirror/state": "^6.5.0",
+		"@codemirror/view": "^6.38.6",
+		"@replit/codemirror-vim": "^6.4.0",
 		"@types/node": "^20.11.0",
 		"@typescript-eslint/eslint-plugin": "^7.0.0",
 		"@typescript-eslint/parser": "^7.0.0",

@@ -1,0 +1,109 @@
+/* ---- World switching: filter the built-in file explorer by world ---- */
+
+/* Notist world: hide every file that is not a .not file (folders stay visible). */
+body.notist-world .nav-file:has(> .nav-file-title:not([data-path$=".not"])) {
+	display: none;
+}
+
+/* Markdown world: hide .not files. */
+body.md-world .nav-file:has(> .nav-file-title[data-path$=".not"]) {
+	display: none;
+}
+
+/* ---- Ribbon isolation: Notist world shows only allowlisted icons ---- */
+
+body.notist-world .side-dock-ribbon-action:not(.notist-ribbon-keep) {
+	display: none;
+}
+
+/* ---- Sidebar guardrail: the (currently unused) custom explorer never
+   shows up in the Markdown world ---- */
+
+body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
+	display: none;
+}
+
+/* ---- Notist explorer ---- */
+
+.notist-explorer {
+	padding: var(--size-4-2);
+}
+
+.notist-explorer-header {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-2-1);
+	margin-bottom: var(--size-4-1);
+}
+
+.notist-explorer-empty {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.notist-explorer-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.notist-explorer-item {
+	padding: var(--size-2-1) var(--size-4-1);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	word-break: break-all;
+}
+
+.notist-explorer-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+/* ---- Plain-text .not editor ---- */
+
+.notist-view-root {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	padding: 0;
+}
+
+/* Specificity note: must beat the theme's `input[type="text"]` (0,1,1);
+   `input.notist-title` ties it and wins by plugin load order. */
+input.notist-title {
+	flex: none;
+	width: auto;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	padding: var(--size-4-4) var(--size-4-4) 0;
+	font-size: var(--inline-title-size, var(--h1-size));
+	font-weight: var(--inline-title-weight, var(--h1-weight));
+	line-height: var(--line-height-tight);
+	color: var(--inline-title-color, var(--text-normal));
+}
+
+input.notist-title:focus {
+	outline: none;
+	box-shadow: none;
+	border: none;
+}
+
+textarea.notist-editor {
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%;
+	border: none;
+	resize: none;
+	padding: var(--size-4-2) var(--size-4-4);
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-text-size);
+	line-height: var(--line-height-normal);
+}
+
+textarea.notist-editor:focus {
+	outline: none;
+	box-shadow: none;
+	border: none;
+}

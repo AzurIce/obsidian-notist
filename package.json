@@ -1,0 +1,22 @@
+{
+	"name": "obsidian-notist",
+	"version": "0.1.0",
+	"description": "Notist World inside Obsidian",
+	"private": true,
+	"scripts": {
+		"dev": "bun run esbuild.config.mjs",
+		"build": "bun x tsc -noEmit -skipLibCheck && bun run esbuild.config.mjs production",
+		"install": "bun run scripts/install.ts",
+		"sync": "bun run build && bun run scripts/install.ts"
+	},
+	"devDependencies": {
+		"@types/node": "^20.11.0",
+		"@typescript-eslint/eslint-plugin": "^7.0.0",
+		"@typescript-eslint/parser": "^7.0.0",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.20.0",
+		"obsidian": "^1.7.2",
+		"tslib": "^2.6.2",
+		"typescript": "^5.4.0"
+	}
+}

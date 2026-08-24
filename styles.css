@@ -60,7 +60,9 @@ body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
 
 /* ---- Plain-text .not editor ---- */
 
-.notist-view-root {
+/* Core's `.view-content` padding (12px/12px/32px) would leave a gap under
+   the editor (visible below the vim panel); out-specify it. */
+.workspace-leaf-content[data-type="notist-view"] .notist-view-root {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
@@ -156,7 +158,22 @@ input.notist-title:focus {
 	background-color: var(--notist-active-line);
 }
 
-/* Native selection (no drawSelection extension): tinted accent. */
+/* drawSelection renders its own caret and selection layer (the native
+   ::selection rules below only matter for edge cases). `!important` beats
+   CM's `.cm-editor.cm-focused .cm-selectionBackground` (0,3,0). */
+.notist-editor .cm-cursor {
+	border-left-color: var(--text-accent);
+}
+
+.notist-editor .cm-selectionBackground {
+	background-color: color-mix(
+		in srgb,
+		var(--interactive-accent) 25%,
+		transparent
+	) !important;
+}
+
+/* Native selection (fallback / outside the drawSelection layer). */
 .notist-editor .cm-content ::selection,
 .notist-editor .cm-content ::-moz-selection {
 	background-color: color-mix(
@@ -164,6 +181,47 @@ input.notist-title:focus {
 		var(--interactive-accent) 25%,
 		transparent
 	);
+}
+
+/* Vim ex-command/search panel (`:` / `/`): joins the theme's bottom bar —
+   same surface as the status bar / vault profile block (`#f6f6f6` here),
+   flush with the leaf bottom, hairline divider on top. The input is
+   stripped of the theme's boxed styling (same specificity problem as
+   input.notist-title, so beat `input[type="text"]` (0,1,1) with (0,3,1)). */
+.notist-editor .cm-vim-panel {
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: var(--size-2-3) var(--size-4-4);
+	border-top: 1px solid var(--divider-color);
+	background-color: var(--status-bar-background, var(--background-secondary));
+	font-family: var(--font-monospace);
+	font-size: var(--font-text-size);
+	color: var(--text-muted);
+}
+
+.notist-editor .cm-vim-panel input[type="text"] {
+	flex: 1 1 auto;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	padding: 0;
+	font-family: inherit;
+	font-size: inherit;
+	/* Match the label's line-height so `:` and input text share a baseline. */
+	line-height: inherit;
+	color: var(--text-normal);
+}
+
+/* The panel's label span is display:flex with default (stretch) alignment;
+   baseline-align it with the input. */
+.notist-editor .cm-vim-panel span {
+	align-items: baseline;
+}
+
+.notist-editor .cm-vim-panel input[type="text"]:focus {
+	outline: none;
+	box-shadow: none;
+	border: none;
 }
 
 /* Vim normal-mode block cursor: solid accent with inverted text. The vim

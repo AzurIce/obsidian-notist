@@ -35,19 +35,41 @@ export class ExplorerDiagnosticBadges {
 	private container: HTMLElement | null = null;
 	private observer: MutationObserver | null = null;
 	private applyTimer: number | null = null;
+	/** Pending re-bind after a mid-layout sync found no explorer. */
+	private retryTimer: number | null = null;
+	/** Set by unmount: timers and re-binds must not outlive the plugin. */
+	private stopped = false;
 
 	constructor(private readonly plugin: NotistPlugin) {}
 
-	/** Find the explorer container (re-)and start observing. Safe to repeat. */
+	/** Find the explorer container (re-)and start observing. Safe to repeat.
+	 * Never tears down a live observer just because the explorer leaf is
+	 * momentarily unfindable (mid-layout): a dead observer means expanded
+	 * folders never get badges until the next diagnostics push. */
 	sync(): void {
 		const leaf = this.plugin.app.workspace.getLeavesOfType("file-explorer")[0];
 		const next =
 			leaf?.view.containerEl.querySelector<HTMLElement>(".nav-files-container") ??
 			document.querySelector<HTMLElement>(".nav-files-container");
 		if (next === this.container && next !== null && this.observer) return;
+		if (!next) {
+			// Explorer missing right now (mid-layout). Keep the current setup
+			// while it is still live; apply() heals a genuinely dead container.
+			if (this.container?.isConnected && this.observer) return;
+			this.stopObserving();
+			this.container = null;
+			// Layout is mid-swap; nothing else will re-trigger sync, so retry
+			// until the explorer reappears (unmount cancels the timer).
+			if (this.retryTimer === null && !this.stopped) {
+				this.retryTimer = window.setTimeout(() => {
+					this.retryTimer = null;
+					this.sync();
+				}, 300);
+			}
+			return;
+		}
 		this.stopObserving();
 		this.container = next;
-		if (!next) return;
 		// Remove badges left behind by a previous instance/container.
 		next.querySelectorAll(".notist-nav-badge").forEach((el) => el.remove());
 		next.addEventListener("mousedown", this.onInteract, true);
@@ -58,9 +80,14 @@ export class ExplorerDiagnosticBadges {
 	}
 
 	unmount(): void {
+		this.stopped = true;
 		if (this.applyTimer !== null) {
 			window.clearTimeout(this.applyTimer);
 			this.applyTimer = null;
+		}
+		if (this.retryTimer !== null) {
+			window.clearTimeout(this.retryTimer);
+			this.retryTimer = null;
 		}
 		this.stopObserving();
 		const container = this.container;
@@ -72,7 +99,14 @@ export class ExplorerDiagnosticBadges {
 	}
 
 	private startObserving(): void {
-		this.observer?.observe(this.container ?? document.body, {
+		if (!this.observer) {
+			// stopObserving() nulls the field before apply()'s finally calls
+			// us — optional chaining alone would silently stay dead, and the
+			// next tree re-render (folder expand) would never re-apply.
+			if (this.stopped) return;
+			this.observer = new MutationObserver(() => this.scheduleApply());
+		}
+		this.observer.observe(this.container ?? document.body, {
 			childList: true,
 			subtree: true,
 			attributes: true,
@@ -91,6 +125,7 @@ export class ExplorerDiagnosticBadges {
 	}
 
 	private scheduleApply(): void {
+		if (this.stopped) return;
 		if (this.applyTimer !== null) window.clearTimeout(this.applyTimer);
 		// Explorer re-renders come in bursts (folder expand renders several
 		// siblings); debounce coalesces them into one DOM walk.
@@ -102,27 +137,29 @@ export class ExplorerDiagnosticBadges {
 
 	private apply(): void {
 		const container = this.container;
-		// Self-heal: leaf recreation (layout-change) invalidates the node.
-		if (!container || !container.isConnected) {
+		// Self-heal: a dead container node (leaf recreation) or a missing
+		// observer (mid-layout sync that found nothing) re-binds first.
+		if (!container || !container.isConnected || !this.observer) {
 			this.sync();
-			return;
+			if (!this.observer) return;
 		}
+		const live = this.container!;
 		const perFile = this.collectPerFile();
-		const anyExisting = container.querySelector(".notist-nav-badge") !== null;
+		const anyExisting = live.querySelector(".notist-nav-badge") !== null;
 		if (perFile.size === 0 && !anyExisting) return;
 
 		// Observe nothing while we mutate — disconnect drops queued records,
 		// so our own insertions never re-trigger this pass.
 		this.stopObserving();
 		try {
-			container.querySelectorAll(".notist-nav-badge").forEach((el) => el.remove());
+			live.querySelectorAll(".notist-nav-badge").forEach((el) => el.remove());
 			if (perFile.size > 0) {
 				const dirs = this.aggregateDirectories(perFile);
-				this.decorateFiles(container, perFile);
-				this.decorateFolders(container, dirs);
+				this.decorateFiles(live, perFile);
+				this.decorateFolders(live, dirs);
 			}
 		} finally {
-			if (this.container === container) this.startObserving();
+			if (this.container === live) this.startObserving();
 		}
 	}
 

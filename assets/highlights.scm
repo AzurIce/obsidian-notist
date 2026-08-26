@@ -1,7 +1,5 @@
 "#" @punctuation.special
 
-"[[" @punctuation.bracket
-"]]" @punctuation.bracket
 "[" @punctuation.bracket
 "]" @punctuation.bracket
 "(" @punctuation.bracket
@@ -45,10 +43,11 @@
   name: (identifier) @variable.parameter)
 
 (type_expression
-  (qualified_name) @type)
+  (type_member
+    (qualified_name) @type))
 
-(import_path
-  (identifier) @module)
+(target_literal
+  target: (_) @module)
 
 (import_item
   alias: (identifier) @variable)
@@ -61,7 +60,8 @@
  (enum_item marker: (enum_marker) @punctuation.list_marker.markup)
  (task_item marker: (task_marker) @punctuation.list_marker.markup)]
 
-(wiki_target) @link_uri
+(target_literal
+  target: (_) @link_uri)
 
 [(strong_marker)
  (emphasis_marker)

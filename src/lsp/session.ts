@@ -9,6 +9,13 @@
  *   so the sending discipline here is the only guard.
  * - Diagnostics are pushed: a baseline right after initialize, then deltas
  *   (unchanged files are not republished; cleared files get an empty set).
+ * - Experimental `notist/documentReferences` (declared under
+ *   capabilities.experimental.notist.documentReferences) resolves the module
+ *   OWNING the document and returns every reference to/from it, without a
+ *   position selector. The standard textDocument/references cannot express
+ *   this: its position contract lands on whatever token sits at offset 0,
+ *   so documents that open with a heading would resolve to the heading
+ *   symbol instead of their module.
  * - $/cancelRequest is honoured best-effort (real cancellation only in the
  *   server's embedded mode; harmless otherwise).
  * No obsidian imports here; the shell layer lives in main.ts.
@@ -18,6 +25,8 @@ import type {
 	LspCompletionItem,
 	LspCompletionResult,
 	LspDiagnostic,
+	LspDocumentReferenceItem,
+	LspDocumentReferencesResult,
 	LspDocumentSymbol,
 	LspHover,
 	LspLocation,
@@ -67,6 +76,9 @@ export function lspUriToPath(uri: string): string {
 
 export class NotistLspSession {
 	state: LspState = "off";
+	/** Raw server capabilities captured at initialize. */
+	private serverCapabilities: unknown = null;
+	private supportsDocumentReferencesCache: boolean | null = null;
 	private transport: LspTransport | null = null;
 	private docs = new Map<string, DocEntry>();
 	private diagnostics = new Map<string, LspDiagnostic[]>();
@@ -127,7 +139,7 @@ export class NotistLspSession {
 		);
 		try {
 			await transport.start();
-			await transport.request("initialize", {
+			const capabilities = (await transport.request("initialize", {
 				processId: null,
 				clientInfo: { name: "obsidian-notist" },
 				rootUri: lspPathToUri(this.vaultRoot),
@@ -144,7 +156,8 @@ export class NotistLspSession {
 						references: {},
 					},
 				},
-			});
+			})) as { capabilities?: unknown } | null;
+			this.serverCapabilities = capabilities?.capabilities ?? null;
 			transport.notify("initialized", {});
 		} catch (e) {
 			this.setState("error", e instanceof Error ? e.message : String(e));
@@ -162,6 +175,8 @@ export class NotistLspSession {
 		this.docs.clear();
 		this.lastRequestId.clear();
 		if (transport) await transport.shutdown().catch(() => undefined);
+		this.serverCapabilities = null;
+		this.supportsDocumentReferencesCache = null;
 		this.setState("off");
 	}
 
@@ -348,6 +363,41 @@ export class NotistLspSession {
 			"workspace-symbols",
 			"workspace/symbol",
 			{ query },
+		);
+	}
+
+	/** Whether the experimental module-level documentReferences extension is
+	 * available (negotiated once from the stored initialize result). Panels
+	 * fall back to position-based references when it is not. */
+	supportsDocumentReferences(): boolean {
+		if (!this.transport || this.state !== "ready") return false;
+		if (this.supportsDocumentReferencesCache === null) {
+			const capabilities = this.serverCapabilities as {
+				experimental?: {
+					notist?: { documentReferences?: unknown };
+				};
+			} | null;
+			this.supportsDocumentReferencesCache =
+				capabilities?.experimental?.notist?.documentReferences !== undefined;
+		}
+		return this.supportsDocumentReferencesCache;
+	}
+
+	/** Module-level references for the document's owning module. Returns
+	 * null only on transport failure or cancellation — an empty items array
+	 * is the genuine "no references" answer. */
+	async documentReferences(
+		path: string,
+		direction: "incoming" | "outgoing",
+	): Promise<LspDocumentReferencesResult | null> {
+		if (!this.transport || this.state !== "ready") return null;
+		return this.queryRequest<LspDocumentReferencesResult>(
+			`document-references:${direction}:${path}`,
+			"notist/documentReferences",
+			{
+				textDocument: { uri: lspPathToUri(path) },
+				direction,
+			},
 		);
 	}
 

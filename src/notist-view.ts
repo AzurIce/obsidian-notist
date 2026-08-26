@@ -138,6 +138,10 @@ export class NotistTextView extends TextFileView {
 							this.requestSave();
 							this.plugin.lspDocChanged(this);
 						}
+						// Caret tracking for semantic panels (outline highlight).
+						if (!this.settingData && (update.selectionSet || update.docChanged)) {
+							this.plugin.notifyViewCursor(this, update.view);
+						}
 					}),
 				],
 			}),

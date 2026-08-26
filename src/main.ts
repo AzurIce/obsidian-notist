@@ -1,14 +1,18 @@
 import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder } from "obsidian";
 import type { Extension } from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
 import {
 	NotistBacklinksView,
 	NotistOutlineView,
+	NotistOutgoingLinksView,
 	NotistSymbolModal,
 	VIEW_TYPE_NOTIST_BACKLINKS,
+	VIEW_TYPE_NOTIST_OUTGOING,
 	VIEW_TYPE_NOTIST_OUTLINE,
 } from "./semantic-panels";
 import { NotistProblemsDock } from "./problems-dock";
+import { ExplorerDiagnosticBadges } from "./explorer-badges";
 import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
 import { NotistLspSession, lspPathToUri, lspUriToPath, type LspState } from "./lsp/session";
@@ -36,6 +40,8 @@ interface NotistPluginData {
 	lspBinaryPath: string;
 	/** Full argv after the binary (Zed-style整体替换), must include `lsp`. */
 	lspBinaryArgs: string[];
+	/** Problems dock expanded across reloads (user preference). */
+	problemsExpanded: boolean;
 }
 
 export interface LspDiagnosticCounts {
@@ -57,6 +63,7 @@ const DEFAULT_DATA: NotistPluginData = {
 	lspEnabled: false,
 	lspBinaryPath: "notist",
 	lspBinaryArgs: ["lsp"],
+	problemsExpanded: false,
 };
 
 const LSP_MAX_RESTARTS = 3;
@@ -100,6 +107,12 @@ export default class NotistPlugin extends Plugin {
 	private lspTooltipText = "";
 	private vaultBasePath: string | null = null;
 	private problemsDock: NotistProblemsDock | null = null;
+	private explorerBadges: ExplorerDiagnosticBadges | null = null;
+	/** Outline-style consumers of caret movement inside .not editors. */
+	private readonly cursorListeners = new Set<
+		(cursor: { path: string; line: number }) => void
+	>();
+	private lastCursor: { path: string; line: number } | null = null;
 	/** Set in onunload: blocks the async restart path after unload. */
 	private unloaded = false;
 	private lastNotistPath: string | null = null;
@@ -121,11 +134,16 @@ export default class NotistPlugin extends Plugin {
 			VIEW_TYPE_NOTIST_BACKLINKS,
 			(leaf) => new NotistBacklinksView(leaf, this),
 		);
+		this.registerView(
+			VIEW_TYPE_NOTIST_OUTGOING,
+			(leaf) => new NotistOutgoingLinksView(leaf, this),
+		);
 		this.registerExtensions(["not"], VIEW_TYPE_NOTIST);
 		this.problemsDock = new NotistProblemsDock(
 			this,
 			this.app.workspace.containerEl,
 		);
+		this.explorerBadges = new ExplorerDiagnosticBadges(this);
 
 		const ribbonEl = this.addRibbonIcon("orbit", TOGGLE_RIBBON_LABEL, () => {
 			void this.toggleWorld();
@@ -151,6 +169,11 @@ export default class NotistPlugin extends Plugin {
 			id: "open-notist-backlinks",
 			name: "Open Notist backlinks",
 			callback: () => void this.activateSemanticView(VIEW_TYPE_NOTIST_BACKLINKS),
+		});
+		this.addCommand({
+			id: "open-notist-outgoing",
+			name: "Open Notist outgoing links",
+			callback: () => void this.activateSemanticView(VIEW_TYPE_NOTIST_OUTGOING),
 		});
 		this.addCommand({
 			id: "open-notist-symbols",
@@ -179,6 +202,8 @@ export default class NotistPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.tagRibbon();
 			this.purgeLegacyLeaves();
+			// File explorer exists by now; start decorating it with badges.
+			this.explorerBadges?.sync();
 			// Guardrail: foreign leaves must never linger in the current
 			// world, including on app start / plugin reload.
 			this.purgeForeignLeaves(this.world);
@@ -200,6 +225,12 @@ export default class NotistPlugin extends Plugin {
 				if (!this.switching && this.world === "notist") {
 					this.purgeForeignLeaves(this.world);
 				}
+				// changeLayout replaces .workspace-split.mod-root; re-mount the
+				// dock (and re-bind explorer badges) onto the new DOM subtree.
+				if (this.problemsDock && !this.problemsDock.isMounted()) {
+					this.problemsDock.mount(this.app.workspace.containerEl);
+				}
+				this.explorerBadges?.sync();
 				this.scheduleLayoutSave();
 			}),
 		);
@@ -274,6 +305,8 @@ export default class NotistPlugin extends Plugin {
 		}
 		void this.saveCurrentLayout();
 		this.hideLspTooltip();
+		this.explorerBadges?.unmount();
+		this.explorerBadges = null;
 		this.problemsDock?.unmount();
 		this.problemsDock = null;
 		void this.stopLsp();
@@ -383,6 +416,60 @@ export default class NotistPlugin extends Plugin {
 		} catch {
 			return location.uri;
 		}
+	}
+
+	/** Absolute vault root, null before an LSP start on a filesystem vault. */
+	vaultBaseAbsolutePath(): string | null {
+		return this.vaultBasePath;
+	}
+
+	/** Vault-relative path for an LSP URI, null when not decodable. */
+	relativePathForUri(uri: string): string | null {
+		try {
+			return this.lspDisplayPath(lspUriToPath(uri));
+		} catch {
+			return null;
+		}
+	}
+
+	/** Live editor overlay text for a vault-relative .not path, else null. */
+	liveVaultFileText(relativePath: string): string | null {
+		return this.notistViewText(relativePath);
+	}
+
+	/** Explorer badge click-through: open a file at its first diagnostic. */
+	async openVaultRelativeDiagnostic(relativePath: string): Promise<void> {
+		const abs = this.lspAbsPath(relativePath);
+		const diagnostics = this.lspDiags.get(abs) ?? [];
+		if (!diagnostics.length) return;
+		await this.openLspDiagnostic(abs, diagnostics[0]);
+	}
+
+	// ---- .not editor caret tracking (outline highlight) ---------------------
+
+	registerNotistCursorListener(
+		listener: (cursor: { path: string; line: number }) => void,
+	): () => void {
+		this.cursorListeners.add(listener);
+		return () => {
+			this.cursorListeners.delete(listener);
+		};
+	}
+
+	lastNotistCursor(): { path: string; line: number } | null {
+		return this.lastCursor;
+	}
+
+	/** Fan out caret movement from a .not editor; dedupes repeats so the CM
+	 * listener can call it on every transaction without cost concerns. */
+	notifyViewCursor(view: NotistTextView, cm: EditorView): void {
+		if (!this.cursorListeners.size || !view.file) return;
+		const head = cm.state.selection.main.head;
+		const cursor = { path: view.file.path, line: cm.state.doc.lineAt(head).number - 1 };
+		const prev = this.lastCursor;
+		if (prev && prev.path === cursor.path && prev.line === cursor.line) return;
+		this.lastCursor = cursor;
+		for (const listener of this.cursorListeners) listener(cursor);
 	}
 
 	private async startLsp(): Promise<void> {
@@ -716,12 +803,15 @@ export default class NotistPlugin extends Plugin {
 		await this.openLspLocation({ uri: lspPathToUri(path), range: diagnostic.range });
 	}
 
+	/** Refresh every vault-level diagnostic surface: the Problems dock and
+	 * the file-explorer badges (semantic panels have their own path). */
 	private refreshProblemsDock(): void {
 		this.problemsDock?.refresh();
+		this.explorerBadges?.refresh();
 	}
 
 	private refreshSemanticViews(): void {
-		for (const type of [VIEW_TYPE_NOTIST_OUTLINE, VIEW_TYPE_NOTIST_BACKLINKS]) {
+		for (const type of [VIEW_TYPE_NOTIST_OUTLINE, VIEW_TYPE_NOTIST_BACKLINKS, VIEW_TYPE_NOTIST_OUTGOING]) {
 			for (const leaf of this.app.workspace.getLeavesOfType(type)) {
 				const view = leaf.view as { refresh?: () => void };
 				view.refresh?.();
@@ -872,6 +962,7 @@ export default class NotistPlugin extends Plugin {
 					VIEW_TYPE_NOTIST,
 					VIEW_TYPE_NOTIST_OUTLINE,
 					VIEW_TYPE_NOTIST_BACKLINKS,
+					VIEW_TYPE_NOTIST_OUTGOING,
 				]
 				: ["markdown", ...NOTIST_FOREIGN_VIEW_TYPES];
 		for (const type of foreignTypes) {

@@ -35,6 +35,27 @@ export interface LspSymbolInformation {
 	containerName?: string;
 }
 
+/** One occurrence in a notist/documentReferences result. Positions follow
+ * the LSP UTF-16 convention; target identity fields come from the resolved
+ * reference index (direction relative to the queried document's module). */
+export interface LspDocumentReferenceItem {
+	uri: string;
+	range: LspRange;
+	direction: "incoming" | "outgoing";
+	sourceModule: string;
+	targetModule: string;
+	targetLabel?: string | null;
+	/** Outgoing only: "module" | "scope" | "resource". */
+	targetKind?: string | null;
+	url?: string | null;
+	isDefinition: boolean;
+}
+
+export interface LspDocumentReferencesResult {
+	revision: number;
+	items: LspDocumentReferenceItem[];
+}
+
 /** LSP DiagnosticSeverity: Error=1, Warning=2, Information=3, Hint=4. */
 export interface LspDiagnostic {
 	range: LspRange;

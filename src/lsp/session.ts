@@ -18,9 +18,11 @@ import type {
 	LspCompletionItem,
 	LspCompletionResult,
 	LspDiagnostic,
+	LspDocumentSymbol,
 	LspHover,
 	LspLocation,
 	LspPosition,
+	LspSymbolInformation,
 	PublishDiagnosticsParams,
 } from "./protocol";
 
@@ -329,6 +331,45 @@ export class NotistLspSession {
 		return first ?? null;
 	}
 
+	async documentSymbols(path: string): Promise<LspDocumentSymbol[] | null> {
+		const entry = this.docs.get(path);
+		if (!this.transport || !entry || this.state !== "ready") return null;
+		this.flush(path);
+		return this.queryRequest<LspDocumentSymbol[]>(
+			`document-symbols:${path}`,
+			"textDocument/documentSymbol",
+			{ textDocument: { uri: entry.uri } },
+		);
+	}
+
+	async workspaceSymbols(query: string): Promise<LspSymbolInformation[] | null> {
+		if (!this.transport || this.state !== "ready") return null;
+		return this.queryRequest<LspSymbolInformation[]>(
+			"workspace-symbols",
+			"workspace/symbol",
+			{ query },
+		);
+	}
+
+	async references(
+		path: string,
+		position: LspPosition,
+		includeDeclaration = false,
+	): Promise<LspLocation[] | null> {
+		const entry = this.docs.get(path);
+		if (!this.transport || !entry || this.state !== "ready") return null;
+		this.flush(path);
+		return this.queryRequest<LspLocation[] | null>(
+			`references:${path}`,
+			"textDocument/references",
+			{
+				textDocument: { uri: entry.uri },
+				position,
+				context: { includeDeclaration },
+			},
+		);
+	}
+
 	/** Position-based request with latest-wins cancellation: a newer request
 	 * of the same kind on the same doc cancels and supersedes the older one. */
 	private async positionRequest<T>(
@@ -352,6 +393,28 @@ export class NotistLspSession {
 		try {
 			const result = (await promise) as T;
 			// Superseded while in flight: drop the late result.
+			if (this.lastRequestId.get(key) !== id) return null;
+			return result;
+		} catch {
+			return null;
+		} finally {
+			if (this.lastRequestId.get(key) === id) this.lastRequestId.delete(key);
+		}
+	}
+
+	private async queryRequest<T>(
+		key: string,
+		method: string,
+		params: unknown,
+	): Promise<T | null> {
+		const transport = this.transport;
+		if (!transport || this.state !== "ready") return null;
+		const previous = this.lastRequestId.get(key);
+		if (previous !== undefined) transport.cancel(previous);
+		const { id, promise } = transport.requestWithId(method, params);
+		this.lastRequestId.set(key, id);
+		try {
+			const result = (await promise) as T;
 			if (this.lastRequestId.get(key) !== id) return null;
 			return result;
 		} catch {

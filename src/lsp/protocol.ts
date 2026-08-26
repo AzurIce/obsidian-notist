@@ -1,6 +1,6 @@
 /**
  * Minimal LSP 3.17 type surface — only what the notist server speaks
- * (FULL sync, UTF-16 positions, the 7 request methods + push diagnostics).
+ * (FULL sync, UTF-16 positions, the semantic request methods + push diagnostics).
  * Hand-written to keep the plugin free of protocol dependencies.
  */
 
@@ -17,6 +17,22 @@ export interface LspRange {
 export interface LspLocation {
 	uri: string;
 	range: LspRange;
+}
+
+export interface LspDocumentSymbol {
+	name: string;
+	detail?: string;
+	kind: number;
+	range: LspRange;
+	selectionRange: LspRange;
+	children?: LspDocumentSymbol[];
+}
+
+export interface LspSymbolInformation {
+	name: string;
+	kind: number;
+	location: LspLocation;
+	containerName?: string;
 }
 
 /** LSP DiagnosticSeverity: Error=1, Warning=2, Information=3, Hint=4. */

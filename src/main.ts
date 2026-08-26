@@ -5,13 +5,25 @@ import {
 	NotistExplorerView,
 	VIEW_TYPE_NOTIST_EXPLORER,
 } from "./explorer-view";
+import {
+	NotistBacklinksView,
+	NotistOutlineView,
+	NotistSymbolModal,
+	VIEW_TYPE_NOTIST_BACKLINKS,
+	VIEW_TYPE_NOTIST_OUTLINE,
+} from "./semantic-panels";
 import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
-import { NotistLspSession, lspUriToPath, type LspState } from "./lsp/session";
+import { NotistLspSession, lspPathToUri, lspUriToPath, type LspState } from "./lsp/session";
 import { notistLsp } from "./lsp/cm";
 import type { LspDiagnostic, LspLocation } from "./lsp/protocol";
 
 type World = "md" | "notist";
+
+interface InternalCommand {
+	callback?: () => unknown;
+	checkCallback?: (checking: boolean) => boolean | void;
+}
 
 interface NotistPluginData {
 	world: World;
@@ -43,6 +55,19 @@ const DEFAULT_DATA: NotistPluginData = {
 
 const LSP_MAX_RESTARTS = 3;
 
+const NOTIST_FOREIGN_VIEW_TYPES = [
+	"backlink",
+	"outgoing-link",
+	"outline",
+	"graph",
+	"localgraph",
+	"tag",
+	"tag-explorer",
+	"all-properties",
+	"file-properties",
+	"excalidraw-sidepanel",
+];
+
 export default class NotistPlugin extends Plugin {
 	data: NotistPluginData = DEFAULT_DATA;
 	private statusBarEl: HTMLElement | null = null;
@@ -71,6 +96,7 @@ export default class NotistPlugin extends Plugin {
 	private vaultBasePath: string | null = null;
 	/** Set in onunload: blocks the async restart path after unload. */
 	private unloaded = false;
+	private lastNotistPath: string | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadPluginData();
@@ -84,6 +110,14 @@ export default class NotistPlugin extends Plugin {
 		this.registerView(
 			VIEW_TYPE_NOTIST_EXPLORER,
 			(leaf) => new NotistExplorerView(leaf),
+		);
+		this.registerView(
+			VIEW_TYPE_NOTIST_OUTLINE,
+			(leaf) => new NotistOutlineView(leaf, this),
+		);
+		this.registerView(
+			VIEW_TYPE_NOTIST_BACKLINKS,
+			(leaf) => new NotistBacklinksView(leaf, this),
 		);
 		this.registerExtensions(["not"], VIEW_TYPE_NOTIST);
 
@@ -101,6 +135,21 @@ export default class NotistPlugin extends Plugin {
 			id: "open-notist-explorer",
 			name: "Open Notist explorer (experimental module tree placeholder)",
 			callback: () => void this.activateExplorer(),
+		});
+		this.addCommand({
+			id: "open-notist-outline",
+			name: "Open Notist outline",
+			callback: () => void this.activateSemanticView(VIEW_TYPE_NOTIST_OUTLINE),
+		});
+		this.addCommand({
+			id: "open-notist-backlinks",
+			name: "Open Notist backlinks",
+			callback: () => void this.activateSemanticView(VIEW_TYPE_NOTIST_BACKLINKS),
+		});
+		this.addCommand({
+			id: "open-notist-symbols",
+			name: "Open Notist symbol search",
+			callback: () => this.openNotistSymbols(),
 		});
 		this.addCommand({
 			id: "reset-world-layouts",
@@ -141,8 +190,22 @@ export default class NotistPlugin extends Plugin {
 		// Keep the current world's layout snapshot fresh so it survives a
 		// crash/kill between world switches.
 		this.registerEvent(
-			this.app.workspace.on("layout-change", () => this.scheduleLayoutSave()),
+			this.app.workspace.on("layout-change", () => {
+				if (!this.switching && this.world === "notist") {
+					this.purgeForeignLeaves(this.world);
+				}
+				this.scheduleLayoutSave();
+			}),
 		);
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", (leaf) => {
+				if (leaf?.view instanceof NotistTextView && leaf.view.file) {
+					this.lastNotistPath = leaf.view.file.path;
+				}
+				if (this.world === "notist") this.purgeForeignLeaves(this.world);
+			}),
+		);
+		this.patchQuickSwitcher();
 
 		// In the Notist world the native explorer is reused (CSS-filtered to
 		// hide Markdown while keeping .not and resource files), but "New note"
@@ -263,9 +326,11 @@ export default class NotistPlugin extends Plugin {
 		}
 		if (view.lspPath) session.viewClosed(this.lspAbsPath(view.lspPath));
 		view.lspPath = path;
+		this.lastNotistPath = path;
 		session.viewOpened(this.lspAbsPath(path), view.getViewData());
 		const diags = this.lspDiags.get(this.lspAbsPath(path));
 		if (diags) view.applyLspDiagnostics(diags);
+		this.refreshSemanticViews();
 	}
 
 	lspViewClosed(view: NotistTextView): void {
@@ -278,6 +343,31 @@ export default class NotistPlugin extends Plugin {
 	lspDocChanged(view: NotistTextView): void {
 		if (this.lspSession && view.lspPath) {
 			this.lspSession.docChanged(this.lspAbsPath(view.lspPath), view.getViewData());
+		}
+	}
+
+	getLspSession(): NotistLspSession | null {
+		return this.lspSession;
+	}
+
+	activeNotistPath(): string | null {
+		const active = this.app.workspace.activeLeaf?.view;
+		if (active instanceof NotistTextView && active.file) return this.lspAbsPath(active.file.path);
+		return this.lastNotistPath ? this.lspAbsPath(this.lastNotistPath) : null;
+	}
+
+	pathToLspUri(path: string): string {
+		return lspPathToUri(path);
+	}
+
+	locationLabel(location: LspLocation): string {
+		try {
+			const path = lspUriToPath(location.uri);
+			const base = this.vaultBasePath;
+			const relative = base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
+			return `${relative}:${location.range.start.line + 1}`;
+		} catch {
+			return location.uri;
 		}
 	}
 
@@ -486,6 +576,7 @@ export default class NotistPlugin extends Plugin {
 					this.lspViewSync(view);
 				}
 			}
+			this.refreshSemanticViews();
 		} else if (state === "error") {
 			console.error("Notist: LSP error", detail ?? "");
 			this.lspSession = null;
@@ -518,9 +609,19 @@ export default class NotistPlugin extends Plugin {
 				view.applyLspDiagnostics(diags);
 			}
 		}
+		this.refreshSemanticViews();
 	}
 
-	private async openLspLocation(loc: LspLocation): Promise<void> {
+	private refreshSemanticViews(): void {
+		for (const type of [VIEW_TYPE_NOTIST_OUTLINE, VIEW_TYPE_NOTIST_BACKLINKS]) {
+			for (const leaf of this.app.workspace.getLeavesOfType(type)) {
+				const view = leaf.view as { refresh?: () => void };
+				view.refresh?.();
+			}
+		}
+	}
+
+	async openLspLocation(loc: LspLocation): Promise<void> {
 		const base = this.vaultBasePath;
 		if (!base) return;
 		let abs: string;
@@ -660,13 +761,85 @@ export default class NotistPlugin extends Plugin {
 	private purgeForeignLeaves(world: World): void {
 		const foreignTypes =
 			world === "md"
-				? [VIEW_TYPE_NOTIST, VIEW_TYPE_NOTIST_EXPLORER]
-				: ["markdown"];
+				? [
+					VIEW_TYPE_NOTIST,
+					VIEW_TYPE_NOTIST_EXPLORER,
+					VIEW_TYPE_NOTIST_OUTLINE,
+					VIEW_TYPE_NOTIST_BACKLINKS,
+				]
+				: ["markdown", ...NOTIST_FOREIGN_VIEW_TYPES];
 		for (const type of foreignTypes) {
 			for (const leaf of this.app.workspace.getLeavesOfType(type)) {
 				leaf.detach();
 			}
 		}
+	}
+
+	private async activateSemanticView(type: string): Promise<void> {
+		if (this.world !== "notist") {
+			new Notice("Switch to Notist World first");
+			return;
+		}
+		let leaf = this.app.workspace.getLeavesOfType(type)[0] ?? null;
+		if (!leaf) {
+			const rightLeaf = this.app.workspace.getRightLeaf(false);
+			if (!rightLeaf) return;
+			leaf = rightLeaf;
+			await rightLeaf.setViewState({ type, active: true });
+		}
+		this.app.workspace.revealLeaf(leaf);
+	}
+
+	private openNotistSymbols(): void {
+		if (this.world !== "notist") return;
+		new NotistSymbolModal(this).open();
+	}
+
+	/** Route every Quick Switcher entry point through Notist symbols in the
+	 * Notist world, while preserving the core command exactly in Markdown. */
+	private patchQuickSwitcher(): void {
+		const registry = (
+			this.app as unknown as {
+				commands?: { commands?: Record<string, InternalCommand> };
+			}
+		).commands?.commands;
+		const command = registry?.["switcher:open"];
+		if (!command) {
+			console.warn("Notist: cannot route Quick Switcher; core command is unavailable");
+			return;
+		}
+
+		const originalCallback = command.callback;
+		const originalCheckCallback = command.checkCallback;
+		const wrappedCallback = originalCallback
+			? () => {
+					if (this.world === "notist") {
+						this.openNotistSymbols();
+						return;
+					}
+					return originalCallback.call(command);
+				}
+			: undefined;
+		const wrappedCheckCallback = originalCheckCallback
+			? (checking: boolean) => {
+					if (this.world === "notist") {
+						if (!checking) this.openNotistSymbols();
+						return true;
+					}
+					return originalCheckCallback.call(command, checking);
+				}
+			: undefined;
+
+		if (wrappedCallback) command.callback = wrappedCallback;
+		if (wrappedCheckCallback) command.checkCallback = wrappedCheckCallback;
+		this.register(() => {
+			if (wrappedCallback && command.callback === wrappedCallback) {
+				command.callback = originalCallback;
+			}
+			if (wrappedCheckCallback && command.checkCallback === wrappedCheckCallback) {
+				command.checkCallback = originalCheckCallback;
+			}
+		});
 	}
 
 	/**

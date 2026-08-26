@@ -17,10 +17,30 @@ body.notist-world .side-dock-ribbon-action:not(.notist-ribbon-keep) {
 	display: none;
 }
 
+/* Markdown World semantic panes have no Notist data source. Keep their saved
+   leaves out of sight while purgeForeignLeaves removes them from the layout. */
+body.notist-world .workspace-leaf-content[data-type="backlink"],
+body.notist-world .workspace-leaf-content[data-type="outgoing-link"],
+body.notist-world .workspace-leaf-content[data-type="outline"],
+body.notist-world .workspace-leaf-content[data-type="graph"],
+body.notist-world .workspace-leaf-content[data-type="localgraph"],
+body.notist-world .workspace-leaf-content[data-type="tag"],
+body.notist-world .workspace-leaf-content[data-type="tag-explorer"],
+body.notist-world .workspace-leaf-content[data-type="all-properties"],
+body.notist-world .workspace-leaf-content[data-type="file-properties"],
+body.notist-world .workspace-leaf-content[data-type="excalidraw-sidepanel"] {
+	display: none;
+}
+
 /* ---- Sidebar guardrail: the (currently unused) custom explorer never
    shows up in the Markdown world ---- */
 
 body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
+	display: none;
+}
+
+body.md-world .workspace-leaf-content[data-type="notist-outline"],
+body.md-world .workspace-leaf-content[data-type="notist-backlinks"] {
 	display: none;
 }
 
@@ -57,6 +77,78 @@ body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
 
 .notist-explorer-item:hover {
 	background-color: var(--background-modifier-hover);
+}
+
+/* ---- Notist semantic panels ---- */
+
+.notist-semantic-panel {
+	padding: var(--size-4-2);
+	overflow: auto;
+}
+
+.notist-semantic-empty,
+.notist-semantic-loading {
+	padding: var(--size-4-2);
+	color: var(--text-muted);
+}
+
+.notist-symbol-tree,
+.notist-symbol-children,
+.notist-reference-list {
+	list-style: none;
+	margin: 0;
+	padding-left: var(--size-4-2);
+}
+
+.notist-symbol-children {
+	padding-left: var(--size-4-3);
+}
+
+.notist-symbol-item,
+.notist-reference-item {
+	margin: 0;
+}
+
+.notist-semantic-link,
+.notist-symbol-result {
+	display: block;
+	width: 100%;
+	border: 0;
+	background: transparent;
+	color: var(--text-normal);
+	text-align: left;
+	cursor: pointer;
+	padding: var(--size-2-1) var(--size-2-2);
+	border-radius: var(--radius-s);
+}
+
+.notist-semantic-link:hover,
+.notist-symbol-result:hover {
+	background: var(--background-modifier-hover);
+}
+
+.notist-symbol-modal {
+	min-width: min(560px, 80vw);
+}
+
+.notist-symbol-modal input {
+	width: 100%;
+}
+
+.notist-symbol-results {
+	max-height: 50vh;
+	overflow: auto;
+	margin-top: var(--size-4-2);
+}
+
+.notist-symbol-result-name,
+.notist-symbol-result-path {
+	display: block;
+}
+
+.notist-symbol-result-path {
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
 }
 
 /* ---- Plain-text .not editor ---- */

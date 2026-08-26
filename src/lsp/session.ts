@@ -86,6 +86,11 @@ export class NotistLspSession {
 		this.stderrTail = (this.stderrTail + text).slice(-4000);
 	}
 
+	/** Recent server stderr (for the status-bar menu's "show stderr"). */
+	getStderrTail(): string {
+		return this.stderrTail;
+	}
+
 	async start(): Promise<void> {
 		if (this.state !== "off" && this.state !== "error") return;
 		this.stopping = false;

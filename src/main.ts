@@ -1,4 +1,4 @@
-import { FileSystemAdapter, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf, setTooltip } from "obsidian";
 import type { Extension } from "@codemirror/state";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
 import {
@@ -51,6 +51,8 @@ export default class NotistPlugin extends Plugin {
 	private layoutSaveTimer: number | null = null;
 	private lspSession: NotistLspSession | null = null;
 	private lspStatusEl: HTMLElement | null = null;
+	/** Last session state, kept after the session ref is gone (error/off). */
+	private lspLastState: LspState = "off";
 	/** Latest per-path diagnostics mirror (paths are absolute). */
 	private lspDiags = new Map<string, LspDiagnostic[]>();
 	private lspRestartAttempts = 0;
@@ -106,6 +108,7 @@ export default class NotistPlugin extends Plugin {
 
 		this.statusBarEl = this.addStatusBarItem();
 		this.statusBarEl.addEventListener("click", () => void this.toggleWorld());
+		this.setupLspStatusItem();
 
 		// Ribbon icons of other plugins may appear after we load; keep the
 		// keep-list tagging in sync with ribbon DOM changes.
@@ -279,15 +282,6 @@ export default class NotistPlugin extends Plugin {
 			return;
 		}
 		this.vaultBasePath = adapter.getBasePath();
-		if (!this.lspStatusEl) {
-			// Drop strays left behind by a previous instance whose async
-			// stopLsp outlived plugin reload.
-			document
-				.querySelectorAll(".notist-lsp-status")
-				.forEach((el) => el.remove());
-			this.lspStatusEl = this.addStatusBarItem();
-			this.lspStatusEl.addClass("notist-lsp-status");
-		}
 		const session = new NotistLspSession(
 			this.data.lspBinaryPath,
 			this.data.lspBinaryArgs.length ? this.data.lspBinaryArgs : ["lsp"],
@@ -323,8 +317,8 @@ export default class NotistPlugin extends Plugin {
 		this.lspDiags.clear();
 		this.lspRestartAttempts = 0;
 		if (session) await session.stop();
-		this.lspStatusEl?.remove();
-		this.lspStatusEl = null;
+		this.lspLastState = "off";
+		this.updateLspStatus();
 		// Strip LSP extensions from all open .not editors.
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
 			const view = leaf.view;
@@ -335,17 +329,91 @@ export default class NotistPlugin extends Plugin {
 		}
 	}
 
+	/** Persistent status-bar item (Zed-style): hover shows state/command,
+	 * click opens a menu with server actions. */
+	private setupLspStatusItem(): void {
+		// Drop strays left behind by a previous instance whose async stopLsp
+		// outlived plugin reload.
+		document
+			.querySelectorAll(".notist-lsp-status")
+			.forEach((el) => el.remove());
+		this.lspStatusEl = this.addStatusBarItem();
+		this.lspStatusEl.addClass("notist-lsp-status");
+		this.lspStatusEl.addEventListener("click", (evt) => this.showLspMenu(evt));
+		this.updateLspStatus();
+	}
+
+	private updateLspStatus(detail?: string): void {
+		if (!this.lspStatusEl) return;
+		const state = this.lspSession?.state ?? this.lspLastState;
+		const label =
+			state === "starting" ? "Notist LSP: starting…" : `Notist LSP: ${state}`;
+		this.lspStatusEl.setText(label);
+		const lines = [
+			`State: ${state}`,
+			`Command: ${this.data.lspBinaryPath} ${this.data.lspBinaryArgs.join(" ")}`,
+			`Working directory: ${this.vaultBasePath ?? "vault root"}`,
+		];
+		if (detail) lines.push(detail);
+		setTooltip(this.lspStatusEl, lines.join("\n"), { placement: "top" });
+	}
+
+	private showLspMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		const running = this.lspSession !== null;
+		if (running) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Restart server")
+					.setIcon("rotate-cw")
+					.onClick(() => void this.restartLsp()),
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Stop server")
+					.setIcon("power")
+					.onClick(() => void this.setLspEnabled(false)),
+			);
+		} else {
+			menu.addItem((item) =>
+				item
+					.setTitle("Start server")
+					.setIcon("play")
+					.onClick(() => void this.setLspEnabled(true)),
+			);
+		}
+		menu.addItem((item) =>
+			item
+				.setTitle("Show recent stderr")
+				.setIcon("terminal")
+				.onClick(() => {
+					const tail = this.lspSession?.getStderrTail().trim();
+					new Notice(tail ? tail.split("\n").slice(-8).join("\n") : "Notist LSP: stderr is empty", 10000);
+				}),
+		);
+		menu.addSeparator();
+		menu.addItem((item) =>
+			item
+				.setTitle("Plugin settings")
+				.setIcon("settings")
+				.onClick(() => {
+					// Internal API (undocumented but widely used by plugins).
+					const setting = (
+						this.app as unknown as {
+							setting?: { open(): void; openTabById(id: string): void };
+						}
+					).setting;
+					setting?.open();
+					setting?.openTabById(this.manifest.id);
+				}),
+		);
+		menu.showAtMouseEvent(evt);
+	}
+
 	private onLspState(state: LspState, detail?: string): void {
 		if (this.unloaded) return;
-		const label =
-			state === "ready"
-				? "Notist LSP: ready"
-				: state === "starting"
-					? "Notist LSP: starting…"
-					: state === "error"
-						? "Notist LSP: error"
-						: "";
-		if (this.lspStatusEl) this.lspStatusEl.setText(label);
+		this.lspLastState = state;
+		this.updateLspStatus(detail);
 		if (state === "ready") {
 			this.lspRestartAttempts = 0;
 			// Session came up (possibly after views opened): register all

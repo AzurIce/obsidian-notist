@@ -27,7 +27,9 @@ const context = await esbuild.context({
 		...builtins,
 	],
 	format: "cjs",
-	target: "es2018",
+	// es2020 for BigInt literals in the bundled web-tree-sitter runtime
+	// (Electron's Chromium supports them; es2018 does not).
+	target: "es2020",
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,

@@ -1,0 +1,2 @@
+tree-sitter-notist f17618ac6719c0e3fa0a6e9e87159c696c9e724e (2026-08-24)
+built with: tree-sitter build --wasm (wasi-sdk)

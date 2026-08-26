@@ -8,6 +8,7 @@
  */
 import {
 	copyFileSync,
+	cpSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -20,6 +21,8 @@ import { join, resolve } from "node:path";
 const pluginRoot = resolve(import.meta.dir, "..");
 const pluginId = "obsidian-notist";
 const artifacts = ["manifest.json", "main.js", "styles.css"];
+/** Shipped verbatim and loaded at runtime (wasm grammar + highlight query). */
+const assetDirs = ["assets"];
 
 const args = process.argv.slice(2);
 const link = args.includes("--link");
@@ -37,6 +40,12 @@ if (!existsSync(join(vault, ".obsidian"))) {
 for (const f of artifacts) {
 	if (!existsSync(join(pluginRoot, f))) {
 		console.error(`error: ${f} missing — run \`bun run build\` first (or use \`bun run sync\`)`);
+		process.exit(1);
+	}
+}
+for (const d of assetDirs) {
+	if (!existsSync(join(pluginRoot, d))) {
+		console.error(`error: ${d}/ missing — highlight assets are required`);
 		process.exit(1);
 	}
 }
@@ -72,6 +81,9 @@ if (link) {
 } else {
 	mkdirSync(target);
 	for (const f of artifacts) copyFileSync(join(pluginRoot, f), join(target, f));
-	console.log(`installed (copy): ${target} [${artifacts.join(", ")}]`);
+	for (const d of assetDirs) {
+		cpSync(join(pluginRoot, d), join(target, d), { recursive: true });
+	}
+	console.log(`installed (copy): ${target} [${[...artifacts, ...assetDirs].join(", ")}]`);
 }
 console.log("next: restart Obsidian (or reload), then enable 'Notist' in Settings → Community plugins");

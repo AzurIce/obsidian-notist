@@ -237,3 +237,142 @@ input.notist-title:focus {
 	outline: 1px solid var(--interactive-accent) !important;
 	color: var(--text-normal) !important;
 }
+
+/* ---- Syntax highlighting (tree-sitter captures → cm-notist-* marks) ---- */
+
+/* Rules below are single-class selectors of equal specificity; when segments
+   nest (e.g. an escape inside a string), the LATER rule wins. Keep outer
+   concepts above, inner/more specific ones below. */
+
+.notist-editor .cm-notist-punctuation-special,
+.notist-editor .cm-notist-punctuation-bracket,
+.notist-editor .cm-notist-punctuation-delimiter {
+	color: var(--text-faint);
+}
+
+.notist-editor .cm-notist-punctuation-list-marker-markup {
+	color: var(--text-accent);
+}
+
+.notist-editor .cm-notist-operator {
+	color: var(--text-muted);
+}
+
+/* Headings: bold body with a modest size ramp (Zed-like restraint). */
+.notist-editor .cm-notist-title-markup {
+	font-weight: var(--font-semibold, 600);
+}
+
+.notist-editor .cm-notist-heading-1 {
+	font-size: 1.35em;
+}
+
+.notist-editor .cm-notist-heading-2 {
+	font-size: 1.2em;
+}
+
+.notist-editor .cm-notist-heading-3 {
+	font-size: 1.1em;
+}
+
+.notist-editor .cm-notist-link-uri {
+	color: var(--text-accent);
+}
+
+.notist-editor .cm-notist-comment {
+	color: var(--text-faint);
+	font-style: italic;
+}
+
+.notist-editor .cm-notist-string,
+.notist-editor .cm-notist-string-special {
+	color: var(--color-green);
+}
+
+.notist-editor .cm-notist-number {
+	color: var(--color-orange);
+}
+
+.notist-editor .cm-notist-boolean,
+.notist-editor .cm-notist-constant-builtin {
+	color: var(--color-purple);
+}
+
+
+/* Code keywords (let/if/else/fn/trailing/import/as, not/and/or) — after the
+   generic .cm-notist-operator rule so keyword-operator wins on overlap. */
+.notist-editor .cm-notist-keyword,
+.notist-editor .cm-notist-keyword-import,
+.notist-editor .cm-notist-keyword-operator {
+	color: var(--color-purple);
+}
+
+.notist-editor .cm-notist-function,
+.notist-editor .cm-notist-function-call {
+	color: var(--color-blue);
+}
+
+.notist-editor .cm-notist-module {
+	color: var(--color-yellow);
+}
+
+.notist-editor .cm-notist-variable {
+	color: var(--color-cyan);
+}
+
+.notist-editor .cm-notist-variable-parameter {
+	color: var(--color-orange);
+}
+
+/* Annotation attribute family: @attr #tag .class key=value, fence info, ids. */
+.notist-editor .cm-notist-attribute {
+	color: var(--color-orange);
+}
+
+.notist-editor .cm-notist-tag {
+	color: var(--color-purple);
+}
+
+.notist-editor .cm-notist-type {
+	color: var(--color-yellow);
+}
+
+.notist-editor .cm-notist-property {
+	color: var(--color-cyan);
+}
+
+.notist-editor .cm-notist-label {
+	color: var(--color-blue);
+}
+
+/* Inline emphasis family (underline is split out from @emphasis by node type). */
+.notist-editor .cm-notist-emphasis {
+	font-style: italic;
+}
+
+.notist-editor .cm-notist-emphasis-strong {
+	font-weight: var(--bold-weight, 700);
+}
+
+.notist-editor .cm-notist-emphasis-strikethrough {
+	text-decoration: line-through;
+}
+
+.notist-editor .cm-notist-underline {
+	text-decoration: underline;
+}
+
+/* Inner captures: keep last so they win over enclosing spans. */
+.notist-editor .cm-notist-string-escape {
+	color: var(--color-cyan);
+}
+
+
+/* ---- LSP ---- */
+
+.notist-lsp-hover {
+	padding: 4px 8px;
+	max-width: 480px;
+	white-space: pre-wrap;
+	font-size: var(--font-ui-smaller);
+}

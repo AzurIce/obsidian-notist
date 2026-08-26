@@ -10,6 +10,12 @@ import {
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { getCM, vim } from "@replit/codemirror-vim";
+import { notistHighlight } from "./highlight";
+import {
+	applyLspDiagnostics,
+	offsetFromPos,
+} from "./lsp/cm";
+import type { LspDiagnostic, LspRange } from "./lsp/protocol";
 import type NotistPlugin from "./main";
 
 export const VIEW_TYPE_NOTIST = "notist-view";
@@ -17,7 +23,9 @@ export const VIEW_TYPE_NOTIST = "notist-view";
 /**
  * Plain-text editor for .not files, backed by a minimal CodeMirror 6
  * (line numbers, soft wrap, history; Obsidian provides the CM runtime).
- * Intentionally minimal: no notist parser/LSP yet.
+ * Syntax highlighting comes from tree-sitter (highlight.ts); optional LSP
+ * semantics (diagnostics/completion/hover/definition) mount through the
+ * lspCompartment (lsp/cm.ts) when the server is enabled and running.
  * Has an inline title (like the markdown view) that renames the file.
  * Vim keybindings are optional (plugin setting), toggled live via a
  * Compartment so open editors pick the change up without a reload.
@@ -34,10 +42,13 @@ export class NotistTextView extends TextFileView {
 
 	private titleInputEl: HTMLInputElement | null = null;
 	private editorView: EditorView | null = null;
-	/** Suppresses requestSave while setViewData is replacing the doc. */
+	/** Suppresses requestSave and LSP forwarding while setViewData replaces the doc. */
 	private settingData = false;
 	private vimCompartment = new Compartment();
 	private editableCompartment = new Compartment();
+	private lspCompartment = new Compartment();
+	/** Vault-relative path this view is registered under in the LSP session. */
+	lspPath: string | null = null;
 	/** The CM5-shim instance our vim-mode-change listener is attached to. */
 	private vimListenerCm: object | null = null;
 
@@ -100,13 +111,21 @@ export class NotistTextView extends TextFileView {
 					drawSelection(),
 					history(),
 					keymap.of([...defaultKeymap, ...historyKeymap]),
+					// tree-sitter highlighting; [] when wasm init failed.
+					notistHighlight(),
+					// LSP (diagnostics/completion/hover/definition); [] when
+					// the server is disabled or failed to start.
+					this.lspCompartment.of(this.plugin.lspExtension(this)),
 					EditorView.lineWrapping,
 					EditorView.contentAttributes.of({
 						spellcheck: "false",
 						tabindex: "0",
 					}),
 					EditorView.updateListener.of((update) => {
-						if (update.docChanged && !this.settingData) this.requestSave();
+						if (update.docChanged && !this.settingData) {
+							this.requestSave();
+							this.plugin.lspDocChanged(this);
+						}
 					}),
 				],
 			}),
@@ -122,6 +141,7 @@ export class NotistTextView extends TextFileView {
 	}
 
 	async onClose(): Promise<void> {
+		this.plugin.lspViewClosed(this);
 		this.editorView?.destroy();
 		this.editorView = null;
 		this.contentEl.empty();
@@ -208,6 +228,10 @@ export class NotistTextView extends TextFileView {
 		return this.editorView?.state.doc.toString() ?? "";
 	}
 
+	hasEditor(): boolean {
+		return this.editorView !== null;
+	}
+
 	setViewData(data: string, _clear: boolean): void {
 		const view = this.editorView;
 		if (view && data !== view.state.doc.toString()) {
@@ -218,6 +242,34 @@ export class NotistTextView extends TextFileView {
 			this.settingData = false;
 		}
 		this.syncTitle();
+		// File content arrives here after open; safe point to register the
+		// document with the LSP session (no-op when already registered).
+		this.plugin.lspViewSync(this);
+	}
+
+	/** Hot-swap the LSP extension (called when the server starts/stops). */
+	setLspExtension(extension: Extension): void {
+		this.editorView?.dispatch({
+			effects: this.lspCompartment.reconfigure(extension),
+		});
+	}
+
+	/** Push server diagnostics into the CM lint state. */
+	applyLspDiagnostics(diagnostics: LspDiagnostic[]): void {
+		if (this.editorView) applyLspDiagnostics(this.editorView, diagnostics);
+	}
+
+	/** Reveal a definition target range in this editor. */
+	revealLspRange(range: LspRange): void {
+		const view = this.editorView;
+		if (!view) return;
+		const from = offsetFromPos(view.state.doc, range.start);
+		const to = offsetFromPos(view.state.doc, range.end);
+		view.dispatch({
+			selection: { anchor: from, head: to },
+			effects: EditorView.scrollIntoView(from, { y: "center" }),
+		});
+		view.focus();
 	}
 
 	clear(): void {

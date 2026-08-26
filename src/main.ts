@@ -1,10 +1,15 @@
-import { Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import type { Extension } from "@codemirror/state";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
 import {
 	NotistExplorerView,
 	VIEW_TYPE_NOTIST_EXPLORER,
 } from "./explorer-view";
 import { NotistSettingTab } from "./settings";
+import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
+import { NotistLspSession, lspUriToPath, type LspState } from "./lsp/session";
+import { notistLsp } from "./lsp/cm";
+import type { LspDiagnostic, LspLocation } from "./lsp/protocol";
 
 type World = "md" | "notist";
 
@@ -16,6 +21,12 @@ interface NotistPluginData {
 	layouts: Partial<Record<World, unknown>>;
 	/** Vim keybindings in the .not editor. */
 	vimMode: boolean;
+	/** Spawn `notist lsp` for semantics (desktop only, opt-in). */
+	lspEnabled: boolean;
+	/** Command or absolute path of the notist binary. */
+	lspBinaryPath: string;
+	/** Full argv after the binary (Zed-style整体替换), must include `lsp`. */
+	lspBinaryArgs: string[];
 }
 
 const TOGGLE_RIBBON_LABEL = "Toggle world (Markdown / Notist)";
@@ -25,7 +36,12 @@ const DEFAULT_DATA: NotistPluginData = {
 	ribbonKeep: [TOGGLE_RIBBON_LABEL],
 	layouts: {},
 	vimMode: false,
+	lspEnabled: false,
+	lspBinaryPath: "notist",
+	lspBinaryArgs: ["lsp"],
 };
+
+const LSP_MAX_RESTARTS = 3;
 
 export default class NotistPlugin extends Plugin {
 	data: NotistPluginData = DEFAULT_DATA;
@@ -33,9 +49,25 @@ export default class NotistPlugin extends Plugin {
 	private ribbonObserver: MutationObserver | null = null;
 	private switching = false;
 	private layoutSaveTimer: number | null = null;
+	private lspSession: NotistLspSession | null = null;
+	private lspStatusEl: HTMLElement | null = null;
+	/** Latest per-path diagnostics mirror (paths are absolute). */
+	private lspDiags = new Map<string, LspDiagnostic[]>();
+	private lspRestartAttempts = 0;
+	private lspRestartTimer: number | null = null;
+	/** Guards against overlapping startLsp calls (restartLsp is not atomic). */
+	private lspStarting = false;
+	private vaultBasePath: string | null = null;
+	/** Set in onunload: blocks the async restart path after unload. */
+	private unloaded = false;
 
 	async onload(): Promise<void> {
 		await this.loadPluginData();
+		// Highlight assets load before view registration so a failure cleanly
+		// means "no highlighting" — no half-initialized intermediate state.
+		await this.initHighlight();
+		// LSP is opt-in and best-effort: failure degrades to highlighting only.
+		if (this.data.lspEnabled) void this.startLsp();
 
 		this.registerView(VIEW_TYPE_NOTIST, (leaf) => new NotistTextView(leaf, this));
 		this.registerView(
@@ -107,12 +139,315 @@ export default class NotistPlugin extends Plugin {
 		// (open + inline rename) then handles the rest.
 		this.patchNewFileCreation();
 
+		// Keep the LSP document registry in sync with renames/deletes that
+		// happen outside the editor (explorer, sync, git, ...).
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (!this.lspSession || !oldPath.endsWith(".not")) return;
+				const text = this.notistViewText(file.path);
+				if (text !== null) {
+					this.lspSession.fileRenamed(
+						this.lspAbsPath(oldPath),
+						this.lspAbsPath(file.path),
+						text,
+					);
+				}
+				// Views re-register lazily via lspViewSync on next setViewData;
+				// update the path key on already-registered views directly.
+				for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+					const view = leaf.view;
+					if (view instanceof NotistTextView && view.lspPath === oldPath) {
+						view.lspPath = file.path;
+					}
+				}
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (!this.lspSession || !file.path.endsWith(".not")) return;
+				this.lspSession.fileClosed(this.lspAbsPath(file.path));
+				this.lspDiags.delete(this.lspAbsPath(file.path));
+			}),
+		);
+
 		this.applyWorld();
 	}
 
 	onunload(): void {
+		this.unloaded = true;
 		void this.saveCurrentLayout();
+		void this.stopLsp();
+		deinitNotistHighlight();
 		document.body.classList.remove("notist-world", "md-world");
+	}
+
+	/** Load the wasm assets and start tree-sitter highlighting (best-effort). */
+	private async initHighlight(): Promise<void> {
+		try {
+			const dir = this.manifest.dir;
+			const adapter = this.app.vault.adapter;
+			const [runtime, grammar, querySource] = await Promise.all([
+				adapter.readBinary(`${dir}/assets/tree-sitter.wasm`),
+				adapter.readBinary(`${dir}/assets/notist.wasm`),
+				adapter.read(`${dir}/assets/highlights.scm`),
+			]);
+			await initNotistHighlight({ runtime, grammar, querySource });
+		} catch (e) {
+			console.error("Notist: syntax highlighting disabled (init failed)", e);
+			new Notice("Notist: syntax highlighting disabled (wasm failed to load)");
+		}
+	}
+
+	// ---- LSP ----------------------------------------------------------------
+
+	lspAbsPath(vaultRelativePath: string): string {
+		return `${this.vaultBasePath ?? ""}/${vaultRelativePath}`;
+	}
+
+	/** Current text of an open .not view for `path`, null when not open. */
+	private notistViewText(path: string): string | null {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+			const view = leaf.view;
+			if (view instanceof NotistTextView && view.file?.path === path) {
+				return view.getViewData();
+			}
+		}
+		return null;
+	}
+
+	/** CM extension for one .not view; [] while LSP is off or down. */
+	lspExtension(view: NotistTextView): Extension {
+		if (!this.data.lspEnabled) return [];
+		return notistLsp({
+			session: () => this.lspSession,
+			path: () => (view.lspPath ? this.lspAbsPath(view.lspPath) : null),
+			openLocation: (loc) => void this.openLspLocation(loc),
+		});
+	}
+
+	/** Register a view with the session once its file content is in. */
+	lspViewSync(view: NotistTextView): void {
+		const session = this.lspSession;
+		if (!session || session.state !== "ready" || !view.file) return;
+		const path = view.file.path;
+		if (view.lspPath === path) {
+			// Already registered: this setViewData is a save echo or an
+			// external edit; the session tells them apart by content.
+			if (view.hasEditor()) {
+				session.externalChange(this.lspAbsPath(path), view.getViewData());
+			}
+			return;
+		}
+		if (view.lspPath) session.viewClosed(this.lspAbsPath(view.lspPath));
+		view.lspPath = path;
+		session.viewOpened(this.lspAbsPath(path), view.getViewData());
+		const diags = this.lspDiags.get(this.lspAbsPath(path));
+		if (diags) view.applyLspDiagnostics(diags);
+	}
+
+	lspViewClosed(view: NotistTextView): void {
+		if (view.lspPath && this.lspSession) {
+			this.lspSession.viewClosed(this.lspAbsPath(view.lspPath));
+		}
+		view.lspPath = null;
+	}
+
+	lspDocChanged(view: NotistTextView): void {
+		if (this.lspSession && view.lspPath) {
+			this.lspSession.docChanged(this.lspAbsPath(view.lspPath), view.getViewData());
+		}
+	}
+
+	private async startLsp(): Promise<void> {
+		if (this.lspSession || this.lspStarting) return;
+		this.lspStarting = true;
+		try {
+			await this.startLspInner();
+		} finally {
+			this.lspStarting = false;
+		}
+	}
+
+	private async startLspInner(): Promise<void> {
+		if (!Platform.isDesktopApp) {
+			new Notice("Notist: language server is desktop-only");
+			return;
+		}
+		const adapter = this.app.vault.adapter;
+		if (!(adapter instanceof FileSystemAdapter)) {
+			new Notice("Notist: language server needs a filesystem vault");
+			return;
+		}
+		this.vaultBasePath = adapter.getBasePath();
+		if (!this.lspStatusEl) {
+			// Drop strays left behind by a previous instance whose async
+			// stopLsp outlived plugin reload.
+			document
+				.querySelectorAll(".notist-lsp-status")
+				.forEach((el) => el.remove());
+			this.lspStatusEl = this.addStatusBarItem();
+			this.lspStatusEl.addClass("notist-lsp-status");
+		}
+		const session = new NotistLspSession(
+			this.data.lspBinaryPath,
+			this.data.lspBinaryArgs.length ? this.data.lspBinaryArgs : ["lsp"],
+			this.vaultBasePath,
+			{
+				onDiagnostics: (path, diags) => this.onLspDiagnostics(path, diags),
+				onState: (state, detail) => this.onLspState(state, detail),
+				onStderr: (text) => console.debug("notist lsp:", text.trimEnd()),
+				onLog: (type, message) => {
+					// Server-side protocol rejections (e.g. malformed didChange)
+					// arrive here since 2026-08-26; make them visible.
+					if (type <= 1) console.error("notist lsp:", message);
+					else if (type === 2) console.warn("notist lsp:", message);
+					else console.debug("notist lsp:", message);
+				},
+			},
+		);
+		this.lspSession = session;
+		try {
+			await session.start();
+		} catch (e) {
+			console.error("Notist: LSP start failed", e);
+		}
+	}
+
+	private async stopLsp(): Promise<void> {
+		if (this.lspRestartTimer !== null) {
+			window.clearTimeout(this.lspRestartTimer);
+			this.lspRestartTimer = null;
+		}
+		const session = this.lspSession;
+		this.lspSession = null;
+		this.lspDiags.clear();
+		this.lspRestartAttempts = 0;
+		if (session) await session.stop();
+		this.lspStatusEl?.remove();
+		this.lspStatusEl = null;
+		// Strip LSP extensions from all open .not editors.
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+			const view = leaf.view;
+			if (view instanceof NotistTextView) {
+				view.setLspExtension([]);
+				view.applyLspDiagnostics([]);
+			}
+		}
+	}
+
+	private onLspState(state: LspState, detail?: string): void {
+		if (this.unloaded) return;
+		const label =
+			state === "ready"
+				? "Notist LSP: ready"
+				: state === "starting"
+					? "Notist LSP: starting…"
+					: state === "error"
+						? "Notist LSP: error"
+						: "";
+		if (this.lspStatusEl) this.lspStatusEl.setText(label);
+		if (state === "ready") {
+			this.lspRestartAttempts = 0;
+			// Session came up (possibly after views opened): register all
+			// open .not views and mount the CM extensions.
+			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+				const view = leaf.view;
+				if (view instanceof NotistTextView) {
+					view.setLspExtension(this.lspExtension(view));
+					this.lspViewSync(view);
+				}
+			}
+		} else if (state === "error") {
+			console.error("Notist: LSP error", detail ?? "");
+			this.lspSession = null;
+			if (this.data.lspEnabled && this.lspRestartAttempts < LSP_MAX_RESTARTS) {
+				const delay = 1000 * 2 ** this.lspRestartAttempts;
+				this.lspRestartAttempts++;
+				this.lspRestartTimer = window.setTimeout(() => {
+					this.lspRestartTimer = null;
+					void this.startLsp();
+				}, delay);
+			} else if (this.data.lspEnabled) {
+				const lastLine = detail?.trim().split("\n").pop();
+				new Notice(
+					`Notist: language server stopped${lastLine ? `: ${lastLine}` : " (see console)"}`,
+					10000,
+				);
+			}
+		}
+	}
+
+	private onLspDiagnostics(path: string, diags: LspDiagnostic[]): void {
+		this.lspDiags.set(path, diags);
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+			const view = leaf.view;
+			if (
+				view instanceof NotistTextView &&
+				view.lspPath &&
+				this.lspAbsPath(view.lspPath) === path
+			) {
+				view.applyLspDiagnostics(diags);
+			}
+		}
+	}
+
+	private async openLspLocation(loc: LspLocation): Promise<void> {
+		const base = this.vaultBasePath;
+		if (!base) return;
+		let abs: string;
+		try {
+			abs = lspUriToPath(loc.uri);
+		} catch {
+			return;
+		}
+		if (!abs.startsWith(`${base}/`)) {
+			new Notice("Notist: definition target is outside this vault");
+			return;
+		}
+		const file = this.app.vault.getAbstractFileByPath(abs.slice(base.length + 1));
+		if (!(file instanceof TFile)) return;
+		const leaf = this.app.workspace.getLeaf(false);
+		await leaf.openFile(file);
+		if (leaf.view instanceof NotistTextView) {
+			leaf.view.revealLspRange(loc.range);
+		}
+	}
+
+	async setLspEnabled(enabled: boolean): Promise<void> {
+		this.data.lspEnabled = enabled;
+		await this.savePluginData();
+		if (enabled) {
+			void this.startLsp();
+		} else {
+			void this.stopLsp();
+		}
+	}
+
+	async setLspBinaryPath(path: string): Promise<void> {
+		this.data.lspBinaryPath = path;
+		await this.savePluginData();
+		await this.restartLsp();
+	}
+
+	async setLspBinaryArgs(args: string[]): Promise<void> {
+		this.data.lspBinaryArgs = args;
+		await this.savePluginData();
+		await this.restartLsp();
+	}
+
+	/** Restart the server after settings changes. Works from any state —
+	 * including post-error, where the session reference is already null but
+	 * the feature is still enabled (and the backoff restart may have given
+	 * up, so we also reset the attempt counter). */
+	private async restartLsp(): Promise<void> {
+		if (!this.data.lspEnabled) return;
+		if (this.lspRestartTimer !== null) {
+			window.clearTimeout(this.lspRestartTimer);
+			this.lspRestartTimer = null;
+		}
+		this.lspRestartAttempts = 0;
+		if (this.lspSession) await this.stopLsp();
+		await this.startLsp();
 	}
 
 	get world(): World {

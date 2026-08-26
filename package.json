@@ -3,6 +3,9 @@
 	"version": "0.1.0",
 	"description": "Notist World inside Obsidian",
 	"private": true,
+	"dependencies": {
+		"web-tree-sitter": "^0.25.10"
+	},
 	"scripts": {
 		"dev": "bun run esbuild.config.mjs",
 		"build": "bun x tsc -noEmit -skipLibCheck && bun run esbuild.config.mjs production",
@@ -10,8 +13,10 @@
 		"sync": "bun run build && bun run scripts/install.ts"
 	},
 	"devDependencies": {
+		"@codemirror/autocomplete": "^6.20.3",
 		"@codemirror/commands": "^6.11.0",
 		"@codemirror/language": "^6.12.4",
+		"@codemirror/lint": "^6.9.7",
 		"@codemirror/state": "^6.5.0",
 		"@codemirror/view": "^6.38.6",
 		"@replit/codemirror-vim": "^6.4.0",

@@ -1,13 +1,15 @@
-import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder } from "obsidian";
 import type { Extension } from "@codemirror/state";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
-import {
-	NotistExplorerView,
-	VIEW_TYPE_NOTIST_EXPLORER,
-} from "./explorer-view";
+import { NotistProblemsDock } from "./problems-dock";
 import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
-import { NotistLspSession, lspUriToPath, type LspState } from "./lsp/session";
+import {
+	NotistLspSession,
+	lspPathToUri,
+	lspUriToPath,
+	type LspState,
+} from "./lsp/session";
 import { notistLsp } from "./lsp/cm";
 import type { LspDiagnostic, LspLocation } from "./lsp/protocol";
 
@@ -29,7 +31,16 @@ interface NotistPluginData {
 	lspBinaryArgs: string[];
 }
 
+export interface LspDiagnosticCounts {
+	errors: number;
+	warnings: number;
+	info: number;
+	hints: number;
+	total: number;
+}
+
 const TOGGLE_RIBBON_LABEL = "Toggle world (Markdown / Notist)";
+const LEGACY_VIEW_TYPES = ["notist-explorer", "notist-diagnostics"];
 
 const DEFAULT_DATA: NotistPluginData = {
 	world: "md",
@@ -49,7 +60,6 @@ export default class NotistPlugin extends Plugin {
 	private ribbonObserver: MutationObserver | null = null;
 	private switching = false;
 	private layoutSaveTimer: number | null = null;
-	private explorerEnsureTimer: number | null = null;
 	/** Serialize whole-object data.json writes so an older layout save cannot
 	 * finish after a newer world/settings save and overwrite it. */
 	private dataSaveQueue: Promise<void> = Promise.resolve();
@@ -69,6 +79,7 @@ export default class NotistPlugin extends Plugin {
 	private lspTooltipTimer: number | null = null;
 	private lspTooltipText = "";
 	private vaultBasePath: string | null = null;
+	private problemsDock: NotistProblemsDock | null = null;
 	/** Set in onunload: blocks the async restart path after unload. */
 	private unloaded = false;
 
@@ -81,11 +92,11 @@ export default class NotistPlugin extends Plugin {
 		if (this.data.lspEnabled) void this.startLsp();
 
 		this.registerView(VIEW_TYPE_NOTIST, (leaf) => new NotistTextView(leaf, this));
-		this.registerView(
-			VIEW_TYPE_NOTIST_EXPLORER,
-			(leaf) => new NotistExplorerView(leaf),
-		);
 		this.registerExtensions(["not"], VIEW_TYPE_NOTIST);
+		this.problemsDock = new NotistProblemsDock(
+			this,
+			this.app.workspace.containerEl,
+		);
 
 		const ribbonEl = this.addRibbonIcon("orbit", TOGGLE_RIBBON_LABEL, () => {
 			void this.toggleWorld();
@@ -98,9 +109,9 @@ export default class NotistPlugin extends Plugin {
 			callback: () => void this.toggleWorld(),
 		});
 		this.addCommand({
-			id: "open-notist-explorer",
-			name: "Open Notist explorer (experimental module tree placeholder)",
-			callback: () => void this.activateExplorer(),
+			id: "toggle-notist-problems",
+			name: "Toggle Notist Problems",
+			callback: () => this.problemsDock?.toggle(),
 		});
 		this.addCommand({
 			id: "reset-world-layouts",
@@ -123,10 +134,10 @@ export default class NotistPlugin extends Plugin {
 		// keep-list tagging in sync with ribbon DOM changes.
 		this.app.workspace.onLayoutReady(() => {
 			this.tagRibbon();
+			this.purgeLegacyLeaves();
 			// Guardrail: foreign leaves must never linger in the current
 			// world, including on app start / plugin reload.
 			this.purgeForeignLeaves(this.world);
-			if (this.world === "notist") this.scheduleExplorerEnsure();
 			const ribbon = document.querySelector(".workspace-ribbon");
 			if (ribbon) {
 				this.ribbonObserver = new MutationObserver(() => this.tagRibbon());
@@ -174,6 +185,14 @@ export default class NotistPlugin extends Plugin {
 						view.lspPath = file.path;
 					}
 				}
+				const oldAbsPath = this.lspAbsPath(oldPath);
+				const newAbsPath = this.lspAbsPath(file.path);
+				const renamedDiagnostics = this.lspDiags.get(oldAbsPath);
+				if (renamedDiagnostics) {
+					this.lspDiags.delete(oldAbsPath);
+					this.lspDiags.set(newAbsPath, renamedDiagnostics);
+				}
+				this.refreshProblemsDock();
 			}),
 		);
 		this.registerEvent(
@@ -181,6 +200,8 @@ export default class NotistPlugin extends Plugin {
 				if (!this.lspSession || !file.path.endsWith(".not")) return;
 				this.lspSession.fileClosed(this.lspAbsPath(file.path));
 				this.lspDiags.delete(this.lspAbsPath(file.path));
+				this.refreshProblemsDock();
+				this.updateLspStatus();
 			}),
 		);
 
@@ -193,12 +214,10 @@ export default class NotistPlugin extends Plugin {
 			window.clearTimeout(this.layoutSaveTimer);
 			this.layoutSaveTimer = null;
 		}
-		if (this.explorerEnsureTimer !== null) {
-			window.clearTimeout(this.explorerEnsureTimer);
-			this.explorerEnsureTimer = null;
-		}
 		void this.saveCurrentLayout();
 		this.hideLspTooltip();
+		this.problemsDock?.unmount();
+		this.problemsDock = null;
 		void this.stopLsp();
 		deinitNotistHighlight();
 		document.body.classList.remove("notist-world", "md-world");
@@ -347,6 +366,7 @@ export default class NotistPlugin extends Plugin {
 				view.applyLspDiagnostics([]);
 			}
 		}
+		this.refreshProblemsDock();
 	}
 
 	/** Persistent status-bar item (Zed-style): hover shows state/command,
@@ -377,9 +397,14 @@ export default class NotistPlugin extends Plugin {
 	private updateLspStatus(detail?: string): void {
 		if (!this.lspStatusEl) return;
 		const state = this.lspSession?.state ?? this.lspLastState;
+		const counts = this.getLspDiagnosticCounts();
 		const label =
 			state === "starting" ? "Notist LSP: starting…" : `Notist LSP: ${state}`;
-		this.lspStatusEl.setText(label);
+		this.lspStatusEl.setText(
+			state === "ready" && (counts.errors > 0 || counts.warnings > 0)
+				? `${label} · E ${counts.errors} W ${counts.warnings}`
+				: label,
+		);
 		const lines = [
 			`State: ${state}`,
 			`Command: ${this.data.lspBinaryPath} ${this.data.lspBinaryArgs.join(" ")}`,
@@ -445,6 +470,12 @@ export default class NotistPlugin extends Plugin {
 		}
 		menu.addItem((item) =>
 			item
+				.setTitle("Toggle Problems")
+				.setIcon("list-x")
+				.onClick(() => this.problemsDock?.toggle()),
+		);
+		menu.addItem((item) =>
+			item
 				.setTitle("Show recent stderr")
 				.setIcon("terminal")
 				.onClick(() => {
@@ -486,9 +517,21 @@ export default class NotistPlugin extends Plugin {
 					this.lspViewSync(view);
 				}
 			}
+			this.refreshProblemsDock();
+			this.updateLspStatus();
 		} else if (state === "error") {
 			console.error("Notist: LSP error", detail ?? "");
 			this.lspSession = null;
+			this.lspDiags.clear();
+			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
+				const view = leaf.view;
+				if (view instanceof NotistTextView) {
+					view.setLspExtension([]);
+					view.applyLspDiagnostics([]);
+				}
+			}
+			this.refreshProblemsDock();
+			this.updateLspStatus(detail);
 			if (this.data.lspEnabled && this.lspRestartAttempts < LSP_MAX_RESTARTS) {
 				const delay = 1000 * 2 ** this.lspRestartAttempts;
 				this.lspRestartAttempts++;
@@ -518,6 +561,76 @@ export default class NotistPlugin extends Plugin {
 				view.applyLspDiagnostics(diags);
 			}
 		}
+		this.refreshProblemsDock();
+		this.updateLspStatus();
+	}
+
+	getLspDisplayState(): LspState {
+		return this.lspSession?.state ?? this.lspLastState;
+	}
+
+	getLspDiagnosticsSnapshot(): Array<[string, LspDiagnostic[]]> {
+		return [...this.lspDiags.entries()].map(([path, diagnostics]) => [
+			path,
+			[...diagnostics],
+		]);
+	}
+
+	getLspDiagnosticCounts(): LspDiagnosticCounts {
+		const counts = { errors: 0, warnings: 0, info: 0, hints: 0, total: 0 };
+		for (const diagnostics of this.lspDiags.values()) {
+			for (const diagnostic of diagnostics) {
+				counts.total++;
+				switch (diagnostic.severity) {
+					case 2:
+						counts.warnings++;
+						break;
+					case 3:
+						counts.info++;
+						break;
+					case 4:
+						counts.hints++;
+						break;
+					default:
+						counts.errors++;
+				}
+			}
+		}
+		return counts;
+	}
+
+	getLspDiagnosticCountsForPath(path: string): LspDiagnosticCounts {
+		const diagnostics = this.lspDiags.get(this.lspAbsPath(path)) ?? [];
+		const counts = { errors: 0, warnings: 0, info: 0, hints: 0, total: diagnostics.length };
+		for (const diagnostic of diagnostics) {
+			switch (diagnostic.severity) {
+				case 2:
+					counts.warnings++;
+					break;
+				case 3:
+					counts.info++;
+					break;
+				case 4:
+					counts.hints++;
+					break;
+				default:
+					counts.errors++;
+			}
+		}
+		return counts;
+	}
+
+	lspDisplayPath(path: string): string {
+		const base = this.vaultBasePath;
+		return base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
+	}
+
+	async openLspDiagnostic(path: string, diagnostic: LspDiagnostic): Promise<void> {
+		await this.openLspLocation({ uri: lspPathToUri(path), range: diagnostic.range });
+	}
+
+	private refreshProblemsDock(): void {
+		this.problemsDock?.refresh();
 	}
 
 	private async openLspLocation(loc: LspLocation): Promise<void> {
@@ -642,7 +755,6 @@ export default class NotistPlugin extends Plugin {
 			// Clean again after restore: snapshots saved by earlier versions
 			// may contain foreign leaves, this heals them.
 			this.purgeForeignLeaves(to);
-			if (to === "notist") await this.ensureExplorer(false);
 			this.data.layouts[to] = this.app.workspace.getLayout();
 			await this.savePluginData();
 		} finally {
@@ -658,14 +770,18 @@ export default class NotistPlugin extends Plugin {
 	 * survives a world switch.)
 	 */
 	private purgeForeignLeaves(world: World): void {
-		const foreignTypes =
-			world === "md"
-				? [VIEW_TYPE_NOTIST, VIEW_TYPE_NOTIST_EXPLORER]
-				: ["markdown"];
+		const foreignTypes = world === "md" ? [VIEW_TYPE_NOTIST] : ["markdown"];
 		for (const type of foreignTypes) {
 			for (const leaf of this.app.workspace.getLeavesOfType(type)) {
 				leaf.detach();
 			}
+		}
+	}
+
+	/** Remove tabs produced by older experimental Explorer/Problems views. */
+	private purgeLegacyLeaves(): void {
+		for (const type of LEGACY_VIEW_TYPES) {
+			for (const leaf of this.app.workspace.getLeavesOfType(type)) leaf.detach();
 		}
 	}
 
@@ -729,43 +845,6 @@ export default class NotistPlugin extends Plugin {
 		);
 	}
 
-	private async activateExplorer(): Promise<void> {
-		await this.ensureExplorer(true);
-	}
-
-	/** Keep the fallback Explorer available as a left-sidebar tab in Notist
-	 * World without taking focus unless the user explicitly opens it. */
-	private async ensureExplorer(reveal: boolean): Promise<void> {
-		const { workspace } = this.app;
-		const leaves = workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER);
-		let leaf: WorkspaceLeaf | null =
-			leaves.find((candidate) => candidate.view instanceof NotistExplorerView) ??
-			null;
-		// Plugin reload can leave an unavailable placeholder with our view type.
-		// Drop placeholders and accidental duplicates before creating a live view.
-		for (const candidate of leaves) {
-			if (candidate !== leaf) candidate.detach();
-		}
-		if (!leaf) {
-			leaf = workspace.getLeftLeaf(false);
-			if (!leaf) return;
-			await leaf.setViewState({
-				type: VIEW_TYPE_NOTIST_EXPLORER,
-				active: reveal,
-			});
-		}
-		if (reveal) workspace.revealLeaf(leaf);
-	}
-
-	private scheduleExplorerEnsure(): void {
-		if (this.explorerEnsureTimer !== null) {
-			window.clearTimeout(this.explorerEnsureTimer);
-		}
-		this.explorerEnsureTimer = window.setTimeout(() => {
-			this.explorerEnsureTimer = null;
-			if (this.world === "notist") void this.ensureExplorer(false);
-		}, 0);
-	}
 
 	private async loadPluginData(): Promise<void> {
 		this.data = Object.assign({}, DEFAULT_DATA, await this.loadData());

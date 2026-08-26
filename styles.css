@@ -17,46 +17,186 @@ body.notist-world .side-dock-ribbon-action:not(.notist-ribbon-keep) {
 	display: none;
 }
 
-/* ---- Sidebar guardrail: the (currently unused) custom explorer never
-   shows up in the Markdown world ---- */
+/* ---- Vault-wide Problems bottom dock ---- */
 
-body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
+.notist-problems-host {
+	position: relative;
+	--notist-problems-height: 2.4rem;
+}
+
+.notist-problems-host.notist-problems-expanded {
+	--notist-problems-height: min(34vh, 22rem);
+}
+
+.workspace-split.mod-root.notist-problems-host {
+	box-sizing: border-box;
+	padding-bottom: var(--notist-problems-height);
+}
+
+.workspace-split.mod-root > .notist-problems-dock {
+	position: absolute;
+	z-index: var(--layer-status-bar, 15);
+	top: auto;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	width: auto;
+	height: var(--notist-problems-height);
+	min-height: 8rem;
+	background-color: var(--background-primary);
+	border-top: 1px solid var(--divider-color);
+	box-shadow: 0 -4px 14px rgb(0 0 0 / 12%);
+}
+
+.workspace-split.mod-root > .notist-problems-dock.is-collapsed {
+	height: 2.4rem;
+	min-height: 2.4rem;
+}
+
+.notist-problems-header {
+	display: flex;
+	align-items: center;
+	min-height: 2.4rem;
+	gap: var(--size-2-2);
+	flex: none;
+	padding: 0 var(--size-4-2);
+	background-color: var(--background-secondary);
+}
+
+.notist-problems-title {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	font-size: var(--font-small);
+	font-weight: var(--font-semibold);
+}
+
+.notist-problems-title svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.notist-problems-summary {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	font-variant-numeric: tabular-nums;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.notist-problems-toggle {
+	flex: none;
+	margin-left: auto;
+}
+
+.notist-problems-list {
+	min-height: 0;
+	overflow: auto;
+	padding: var(--size-4-1) var(--size-4-2) var(--size-4-4);
+}
+
+.notist-problems-file {
+	margin-bottom: var(--size-4-2);
+}
+
+.notist-problems-file-header {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: var(--size-2-1) var(--size-4-1);
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-small);
+}
+
+.notist-problems-file-path {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.notist-problems-file-count {
+	flex: none;
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.notist-problem-row {
+	display: flex;
+	align-items: baseline;
+	width: 100%;
+	gap: var(--size-2-2);
+	padding: var(--size-2-1) var(--size-4-1);
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	color: var(--text-normal);
+	text-align: left;
+	cursor: pointer;
+}
+
+.notist-problem-row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.notist-problem-severity {
+	flex: none;
+	min-width: 5.5em;
+	font-size: var(--font-smallest);
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+}
+
+.notist-diagnostic-severity-1 { color: var(--text-error); }
+.notist-diagnostic-severity-2 { color: var(--text-warning); }
+.notist-diagnostic-severity-3,
+.notist-diagnostic-severity-4 { color: var(--text-muted); }
+
+.notist-problem-position {
+	flex: none;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: var(--font-small);
+}
+
+.notist-problem-message {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.notist-problem-code {
+	flex: none;
+	color: var(--text-faint);
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+}
+
+.notist-problems-status,
+.notist-problems-empty {
+	padding: var(--size-4-4);
+	color: var(--text-muted);
+	font-size: var(--font-small);
+}
+
+.notist-problems-status.is-error {
+	color: var(--text-error);
+}
+
+body.md-world .notist-problems-dock {
 	display: none;
 }
 
-/* ---- Notist explorer ---- */
-
-.notist-explorer {
-	padding: var(--size-4-2);
-}
-
-.notist-explorer-header {
-	display: flex;
-	justify-content: flex-end;
-	gap: var(--size-2-1);
-	margin-bottom: var(--size-4-1);
-}
-
-.notist-explorer-empty {
-	color: var(--text-muted);
-	font-style: italic;
-}
-
-.notist-explorer-list {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-}
-
-.notist-explorer-item {
-	padding: var(--size-2-1) var(--size-4-1);
-	border-radius: var(--radius-s);
-	cursor: pointer;
-	word-break: break-all;
-}
-
-.notist-explorer-item:hover {
-	background-color: var(--background-modifier-hover);
+body.md-world .workspace-split.mod-root.notist-problems-host {
+	padding-bottom: 0;
 }
 
 /* ---- Plain-text .not editor ---- */

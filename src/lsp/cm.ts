@@ -8,7 +8,9 @@ import type { Extension, Text } from "@codemirror/state";
 import { EditorView, hoverTooltip, keymap } from "@codemirror/view";
 import {
 	linter,
+	lintKeymap,
 	lintGutter,
+	previousDiagnostic,
 	setDiagnostics,
 	type Diagnostic as CmDiagnostic,
 } from "@codemirror/lint";
@@ -171,12 +173,17 @@ export function notistLsp(hooks: LspCmHooks): Extension {
 			},
 		},
 	]);
+	const diagnosticsKeymap = keymap.of([
+		...lintKeymap,
+		{ key: "Shift-F8", run: previousDiagnostic },
+	]);
 
 	return [
 		// Push model: null source installs the lint state field without an
 		// active linter; real diagnostics arrive via setDiagnostics pushes.
 		linter(null),
 		lintGutter(),
+		diagnosticsKeymap,
 		autocompletion({ override: [completionSource] }),
 		hover,
 		definitionKeymap,

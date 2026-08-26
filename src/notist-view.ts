@@ -1,4 +1,11 @@
-import { Notice, TFile, TextFileView, WorkspaceLeaf } from "obsidian";
+import {
+	Notice,
+	TFile,
+	TextFileView,
+	WorkspaceLeaf,
+	moment,
+	type MarkdownFileInfo,
+} from "obsidian";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import {
 	EditorView,
@@ -17,6 +24,7 @@ import {
 } from "./lsp/cm";
 import type { LspDiagnostic, LspRange } from "./lsp/protocol";
 import type NotistPlugin from "./main";
+import { NotistEditorAdapter } from "./editor-adapter";
 
 export const VIEW_TYPE_NOTIST = "notist-view";
 
@@ -42,6 +50,7 @@ export class NotistTextView extends TextFileView {
 
 	private titleInputEl: HTMLInputElement | null = null;
 	private editorView: EditorView | null = null;
+	private editorAdapter: NotistEditorAdapter | null = null;
 	/** Suppresses requestSave and LSP forwarding while setViewData replaces the doc. */
 	private settingData = false;
 	private vimCompartment = new Compartment();
@@ -121,6 +130,9 @@ export class NotistTextView extends TextFileView {
 						spellcheck: "false",
 						tabindex: "0",
 					}),
+					EditorView.domEventHandlers({
+						paste: (event) => this.handlePaste(event),
+					}),
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged && !this.settingData) {
 							this.requestSave();
@@ -130,6 +142,7 @@ export class NotistTextView extends TextFileView {
 				],
 			}),
 		});
+		this.editorAdapter = new NotistEditorAdapter(this.editorView);
 
 		if (vimMode) this.ensureVimModeListener();
 
@@ -144,8 +157,69 @@ export class NotistTextView extends TextFileView {
 		this.plugin.lspViewClosed(this);
 		this.editorView?.destroy();
 		this.editorView = null;
+		this.editorAdapter = null;
 		this.contentEl.empty();
 		this.titleInputEl = null;
+	}
+
+	/** Route paste through the same extension event used by Markdown views, then
+	 * use Obsidian's attachment path/link APIs for unhandled clipboard images.
+	 * Unhandled plain text falls through to CodeMirror. */
+	private handlePaste(event: ClipboardEvent): boolean {
+		const editor = this.editorAdapter;
+		if (!editor) return false;
+		const info: MarkdownFileInfo = {
+			app: this.app,
+			file: this.file,
+			editor,
+			hoverPopover: null,
+		};
+		this.app.workspace.trigger("editor-paste", event, editor, info);
+		if (event.defaultPrevented) return true;
+
+		const images = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+			file.type.startsWith("image/"),
+		);
+		if (images.length === 0) return false;
+
+		event.preventDefault();
+		void this.insertClipboardImages(images, editor);
+		return true;
+	}
+
+	private async insertClipboardImages(
+		images: File[],
+		editor: NotistEditorAdapter,
+	): Promise<void> {
+		const sourcePath = this.file?.path ?? "";
+		const links: string[] = [];
+		for (const image of images) {
+			try {
+				const filename = `Pasted image ${moment().format("YYYYMMDDHHmmss")}.${this.imageExtension(image)}`;
+				const path = await this.app.fileManager.getAvailablePathForAttachment(
+					filename,
+					sourcePath,
+				);
+				const attachment = await this.app.vault.createBinary(
+					path,
+					await image.arrayBuffer(),
+				);
+				links.push(
+					`!${this.app.fileManager.generateMarkdownLink(attachment, sourcePath)}`,
+				);
+			} catch (error) {
+				console.error("Notist: failed to paste clipboard image", error);
+				new Notice("Notist: failed to save pasted image");
+			}
+		}
+		if (links.length > 0) editor.replaceSelection(links.join("\n"));
+	}
+
+	private imageExtension(image: File): string {
+		const fromName = image.name.match(/\.([a-zA-Z0-9]+)$/)?.[1];
+		if (fromName) return fromName.toLowerCase();
+		const subtype = image.type.slice("image/".length).split("+")[0];
+		return subtype === "jpeg" ? "jpg" : subtype || "png";
 	}
 
 	/** Focus the inline title with the basename selected (post-create rename UX). */

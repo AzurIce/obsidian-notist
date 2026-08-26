@@ -3,7 +3,7 @@ import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 export const VIEW_TYPE_NOTIST_EXPLORER = "notist-explorer";
 
 /**
- * Notist World's own file tree: lists only .not files.
+ * Notist World's own file tree: lists every file except Markdown sources.
  * Flat path-sorted list for now; module-structure grouping comes later
  * (data will eventually come from notist-service, not raw vault files).
  */
@@ -53,12 +53,12 @@ export class NotistExplorerView extends ItemView {
 
 		const files = this.app.vault
 			.getFiles()
-			.filter((f: TFile) => f.extension === "not")
+			.filter((f: TFile) => f.extension.toLowerCase() !== "md")
 			.sort((a, b) => a.path.localeCompare(b.path));
 
 		if (files.length === 0) {
 			container.createDiv("notist-explorer-empty").setText(
-				"No .not files in this vault.",
+				"No Notist or resource files in this vault.",
 			);
 			return;
 		}

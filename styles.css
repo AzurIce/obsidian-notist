@@ -1,7 +1,8 @@
 /* ---- World switching: filter the built-in file explorer by world ---- */
 
-/* Notist world: hide every file that is not a .not file (folders stay visible). */
-body.notist-world .nav-file:has(> .nav-file-title:not([data-path$=".not"])) {
+/* Notist world: resources and other project files stay visible; only Markdown
+   source files are hidden (folders stay visible). */
+body.notist-world .nav-file:has(> .nav-file-title[data-path$=".md" i]) {
 	display: none;
 }
 

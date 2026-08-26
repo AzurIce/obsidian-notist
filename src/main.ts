@@ -49,6 +49,10 @@ export default class NotistPlugin extends Plugin {
 	private ribbonObserver: MutationObserver | null = null;
 	private switching = false;
 	private layoutSaveTimer: number | null = null;
+	private explorerEnsureTimer: number | null = null;
+	/** Serialize whole-object data.json writes so an older layout save cannot
+	 * finish after a newer world/settings save and overwrite it. */
+	private dataSaveQueue: Promise<void> = Promise.resolve();
 	private lspSession: NotistLspSession | null = null;
 	private lspStatusEl: HTMLElement | null = null;
 	/** Last session state, kept after the session ref is gone (error/off). */
@@ -122,6 +126,7 @@ export default class NotistPlugin extends Plugin {
 			// Guardrail: foreign leaves must never linger in the current
 			// world, including on app start / plugin reload.
 			this.purgeForeignLeaves(this.world);
+			if (this.world === "notist") this.scheduleExplorerEnsure();
 			const ribbon = document.querySelector(".workspace-ribbon");
 			if (ribbon) {
 				this.ribbonObserver = new MutationObserver(() => this.tagRibbon());
@@ -140,7 +145,8 @@ export default class NotistPlugin extends Plugin {
 		);
 
 		// In the Notist world the native explorer is reused (CSS-filtered to
-		// .not files), but "New note" still creates .md. Every creation entry
+		// hide Markdown while keeping .not and resource files), but "New note"
+		// still creates .md. Every creation entry
 		// point (header button, context menu, command palette, hotkey) funnels
 		// into FileManager.createNewMarkdownFile — patch that single chokepoint
 		// to create .not files instead. The explorer's native afterCreate
@@ -183,6 +189,14 @@ export default class NotistPlugin extends Plugin {
 
 	onunload(): void {
 		this.unloaded = true;
+		if (this.layoutSaveTimer !== null) {
+			window.clearTimeout(this.layoutSaveTimer);
+			this.layoutSaveTimer = null;
+		}
+		if (this.explorerEnsureTimer !== null) {
+			window.clearTimeout(this.explorerEnsureTimer);
+			this.explorerEnsureTimer = null;
+		}
 		void this.saveCurrentLayout();
 		this.hideLspTooltip();
 		void this.stopLsp();
@@ -570,7 +584,12 @@ export default class NotistPlugin extends Plugin {
 	}
 
 	async savePluginData(): Promise<void> {
-		await this.saveData(this.data);
+		const snapshot = JSON.parse(JSON.stringify(this.data)) as NotistPluginData;
+		const save = this.dataSaveQueue.then(() => this.saveData(snapshot));
+		this.dataSaveQueue = save.catch((error) => {
+			console.error("Notist: failed to save plugin data", error);
+		});
+		await save;
 	}
 
 	/** Persist the vim-mode flag and reconfigure every open .not editor. */
@@ -594,9 +613,14 @@ export default class NotistPlugin extends Plugin {
 	}
 
 	private async toggleWorld(): Promise<void> {
+		if (this.switching) return;
 		const from = this.world;
 		const to: World = from === "md" ? "notist" : "md";
 		this.switching = true;
+		if (this.layoutSaveTimer !== null) {
+			window.clearTimeout(this.layoutSaveTimer);
+			this.layoutSaveTimer = null;
+		}
 		try {
 			// Clean the outgoing world before snapshotting so foreign tabs
 			// never leak into its stored layout.
@@ -604,16 +628,21 @@ export default class NotistPlugin extends Plugin {
 			this.data.layouts[from] = this.app.workspace.getLayout();
 			this.data.world = to;
 			this.applyWorld();
+			// Persist the world identity before layout restoration. changeLayout
+			// can be interrupted by an app/plugin reload, but the next load must
+			// still return to the world the user selected.
+			await this.savePluginData();
 			const layout = this.data.layouts[to];
 			if (layout) {
 				await this.app.workspace.changeLayout(layout);
 			}
 			// First entry into the Notist world just starts from the current
 			// layout: the native file explorer carries over and is reused
-			// (CSS-filtered to .not files).
+			// (CSS-filtered to hide Markdown files).
 			// Clean again after restore: snapshots saved by earlier versions
 			// may contain foreign leaves, this heals them.
 			this.purgeForeignLeaves(to);
+			if (to === "notist") await this.ensureExplorer(false);
 			this.data.layouts[to] = this.app.workspace.getLayout();
 			await this.savePluginData();
 		} finally {
@@ -701,18 +730,41 @@ export default class NotistPlugin extends Plugin {
 	}
 
 	private async activateExplorer(): Promise<void> {
+		await this.ensureExplorer(true);
+	}
+
+	/** Keep the fallback Explorer available as a left-sidebar tab in Notist
+	 * World without taking focus unless the user explicitly opens it. */
+	private async ensureExplorer(reveal: boolean): Promise<void> {
 		const { workspace } = this.app;
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER);
 		let leaf: WorkspaceLeaf | null =
-			workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER)[0] ?? null;
+			leaves.find((candidate) => candidate.view instanceof NotistExplorerView) ??
+			null;
+		// Plugin reload can leave an unavailable placeholder with our view type.
+		// Drop placeholders and accidental duplicates before creating a live view.
+		for (const candidate of leaves) {
+			if (candidate !== leaf) candidate.detach();
+		}
 		if (!leaf) {
 			leaf = workspace.getLeftLeaf(false);
 			if (!leaf) return;
 			await leaf.setViewState({
 				type: VIEW_TYPE_NOTIST_EXPLORER,
-				active: true,
+				active: reveal,
 			});
 		}
-		workspace.revealLeaf(leaf);
+		if (reveal) workspace.revealLeaf(leaf);
+	}
+
+	private scheduleExplorerEnsure(): void {
+		if (this.explorerEnsureTimer !== null) {
+			window.clearTimeout(this.explorerEnsureTimer);
+		}
+		this.explorerEnsureTimer = window.setTimeout(() => {
+			this.explorerEnsureTimer = null;
+			if (this.world === "notist") void this.ensureExplorer(false);
+		}, 0);
 	}
 
 	private async loadPluginData(): Promise<void> {

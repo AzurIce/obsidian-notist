@@ -12,9 +12,11 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	readFileSync,
 	readlinkSync,
 	rmSync,
 	symlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -53,6 +55,7 @@ for (const d of assetDirs) {
 const pluginsDir = join(vault, ".obsidian", "plugins");
 mkdirSync(pluginsDir, { recursive: true });
 const target = join(pluginsDir, pluginId);
+let preservedData: Buffer | null = null;
 
 if (existsSync(target) || lstatSync(target, { throwIfNoEntry: false })) {
 	const stat = lstatSync(target);
@@ -62,6 +65,8 @@ if (existsSync(target) || lstatSync(target, { throwIfNoEntry: false })) {
 			console.log(`already installed (link): ${target} -> ${current}`);
 			process.exit(0);
 		}
+		const dataPath = join(target, "data.json");
+		if (existsSync(dataPath)) preservedData = readFileSync(dataPath);
 		rmSync(target);
 		console.log(`replaced existing symlink (was -> ${current})`);
 	} else if (link) {
@@ -69,9 +74,6 @@ if (existsSync(target) || lstatSync(target, { throwIfNoEntry: false })) {
 			`error: ${target} exists and is not a symlink; refusing to remove a real directory`,
 		);
 		process.exit(1);
-	} else {
-		// copy mode: refresh our own previously-copied directory
-		rmSync(target, { recursive: true });
 	}
 }
 
@@ -79,11 +81,19 @@ if (link) {
 	symlinkSync(pluginRoot, target, "dir");
 	console.log(`installed (link): ${target} -> ${pluginRoot}`);
 } else {
-	mkdirSync(target);
+	// Obsidian stores plugin settings in target/data.json. Refresh only the
+	// files managed by this installer so syncing another worktree cannot
+	// erase settings (or any other runtime-owned files).
+	mkdirSync(target, { recursive: true });
 	for (const f of artifacts) copyFileSync(join(pluginRoot, f), join(target, f));
 	for (const d of assetDirs) {
+		rmSync(join(target, d), { recursive: true, force: true });
 		cpSync(join(pluginRoot, d), join(target, d), { recursive: true });
 	}
 	console.log(`installed (copy): ${target} [${[...artifacts, ...assetDirs].join(", ")}]`);
+}
+if (preservedData) {
+	writeFileSync(join(target, "data.json"), preservedData);
+	console.log("preserved plugin settings (data.json)");
 }
 console.log("next: restart Obsidian (or reload), then enable 'Notist' in Settings → Community plugins");

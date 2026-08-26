@@ -1,4 +1,4 @@
-import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf, setTooltip } from "obsidian";
+import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import type { Extension } from "@codemirror/state";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
 import {
@@ -59,6 +59,11 @@ export default class NotistPlugin extends Plugin {
 	private lspRestartTimer: number | null = null;
 	/** Guards against overlapping startLsp calls (restartLsp is not atomic). */
 	private lspStarting = false;
+	/** Custom hover tooltip for the LSP status item (Obsidian 1.13's
+	 * aria-label tooltips don't fire on status bar items). */
+	private lspTooltipEl: HTMLElement | null = null;
+	private lspTooltipTimer: number | null = null;
+	private lspTooltipText = "";
 	private vaultBasePath: string | null = null;
 	/** Set in onunload: blocks the async restart path after unload. */
 	private unloaded = false;
@@ -179,6 +184,7 @@ export default class NotistPlugin extends Plugin {
 	onunload(): void {
 		this.unloaded = true;
 		void this.saveCurrentLayout();
+		this.hideLspTooltip();
 		void this.stopLsp();
 		deinitNotistHighlight();
 		document.body.classList.remove("notist-world", "md-world");
@@ -340,6 +346,17 @@ export default class NotistPlugin extends Plugin {
 		this.lspStatusEl = this.addStatusBarItem();
 		this.lspStatusEl.addClass("notist-lsp-status");
 		this.lspStatusEl.addEventListener("click", (evt) => this.showLspMenu(evt));
+		this.lspStatusEl.addEventListener("mouseenter", () => {
+			if (this.lspTooltipTimer !== null)
+				window.clearTimeout(this.lspTooltipTimer);
+			this.lspTooltipTimer = window.setTimeout(() => {
+				this.lspTooltipTimer = null;
+				this.showLspTooltip();
+			}, 250);
+		});
+		this.lspStatusEl.addEventListener("mouseleave", () =>
+			this.hideLspTooltip(),
+		);
 		this.updateLspStatus();
 	}
 
@@ -355,10 +372,40 @@ export default class NotistPlugin extends Plugin {
 			`Working directory: ${this.vaultBasePath ?? "vault root"}`,
 		];
 		if (detail) lines.push(detail);
-		setTooltip(this.lspStatusEl, lines.join("\n"), { placement: "top" });
+		this.lspTooltipText = lines.join("\n");
+		if (this.lspTooltipEl) this.renderLspTooltip();
+	}
+
+	private showLspTooltip(): void {
+		if (this.lspTooltipEl || !this.lspStatusEl) return;
+		this.lspTooltipEl = document.body.createDiv("notist-lsp-tooltip");
+		this.renderLspTooltip();
+	}
+
+	private renderLspTooltip(): void {
+		const tip = this.lspTooltipEl;
+		if (!tip || !this.lspStatusEl) return;
+		tip.empty();
+		for (const line of this.lspTooltipText.split("\n")) {
+			tip.createDiv().setText(line);
+		}
+		// Anchor above the status bar item, right edges aligned.
+		const r = this.lspStatusEl.getBoundingClientRect();
+		tip.style.right = `${window.innerWidth - r.right}px`;
+		tip.style.bottom = `${window.innerHeight - r.top + 6}px`;
+	}
+
+	private hideLspTooltip(): void {
+		if (this.lspTooltipTimer !== null) {
+			window.clearTimeout(this.lspTooltipTimer);
+			this.lspTooltipTimer = null;
+		}
+		this.lspTooltipEl?.remove();
+		this.lspTooltipEl = null;
 	}
 
 	private showLspMenu(evt: MouseEvent): void {
+		this.hideLspTooltip();
 		const menu = new Menu();
 		const running = this.lspSession !== null;
 		if (running) {

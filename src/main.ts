@@ -2,6 +2,7 @@ import { FileSystemAdapter, Menu, Notice, Platform, Plugin, TFile, TFolder } fro
 import type { Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { NotistTextView, VIEW_TYPE_NOTIST } from "./notist-view";
+import { NotistExplorerView, VIEW_TYPE_NOTIST_EXPLORER } from "./explorer-view";
 import {
 	NotistBacklinksView,
 	NotistOutlineView,
@@ -53,7 +54,7 @@ export interface LspDiagnosticCounts {
 }
 
 const TOGGLE_RIBBON_LABEL = "Toggle world (Markdown / Notist)";
-const LEGACY_VIEW_TYPES = ["notist-explorer", "notist-diagnostics"];
+const LEGACY_VIEW_TYPES = ["notist-diagnostics"];
 
 const DEFAULT_DATA: NotistPluginData = {
 	world: "md",
@@ -127,6 +128,10 @@ export default class NotistPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE_NOTIST, (leaf) => new NotistTextView(leaf, this));
 		this.registerView(
+			VIEW_TYPE_NOTIST_EXPLORER,
+			(leaf) => new NotistExplorerView(leaf, this),
+		);
+		this.registerView(
 			VIEW_TYPE_NOTIST_OUTLINE,
 			(leaf) => new NotistOutlineView(leaf, this),
 		);
@@ -159,6 +164,11 @@ export default class NotistPlugin extends Plugin {
 			id: "toggle-notist-problems",
 			name: "Toggle Notist Problems",
 			callback: () => this.problemsDock?.toggle(),
+		});
+		this.addCommand({
+			id: "open-notist-explorer",
+			name: "Open Notist explorer",
+			callback: () => void this.activateExplorer(),
 		});
 		this.addCommand({
 			id: "open-notist-outline",
@@ -803,11 +813,16 @@ export default class NotistPlugin extends Plugin {
 		await this.openLspLocation({ uri: lspPathToUri(path), range: diagnostic.range });
 	}
 
-	/** Refresh every vault-level diagnostic surface: the Problems dock and
-	 * the file-explorer badges (semantic panels have their own path). */
+	/** Refresh every vault-level diagnostic surface: the Problems dock, the
+	 * file-explorer badges and the Notist explorer tree pills (semantic
+	 * panels have their own path). */
 	private refreshProblemsDock(): void {
 		this.problemsDock?.refresh();
 		this.explorerBadges?.refresh();
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER)) {
+			const view = leaf.view as { refreshDiagnostics?: () => void };
+			view.refreshDiagnostics?.();
+		}
 	}
 
 	private refreshSemanticViews(): void {
@@ -960,6 +975,7 @@ export default class NotistPlugin extends Plugin {
 			world === "md"
 				? [
 					VIEW_TYPE_NOTIST,
+					VIEW_TYPE_NOTIST_EXPLORER,
 					VIEW_TYPE_NOTIST_OUTLINE,
 					VIEW_TYPE_NOTIST_BACKLINKS,
 					VIEW_TYPE_NOTIST_OUTGOING,
@@ -985,6 +1001,26 @@ export default class NotistPlugin extends Plugin {
 			await rightLeaf.setViewState({ type, active: true });
 		}
 		this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Open the .not file tree in the left sidebar (single reused leaf). */
+	private async activateExplorer(): Promise<void> {
+		if (this.world !== "notist") {
+			new Notice("Switch to Notist World first");
+			return;
+		}
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER)[0] ?? null;
+		if (!leaf) {
+			const leftLeaf = workspace.getLeftLeaf(false);
+			if (!leftLeaf) return;
+			leaf = leftLeaf;
+			await leftLeaf.setViewState({
+				type: VIEW_TYPE_NOTIST_EXPLORER,
+				active: true,
+			});
+		}
+		workspace.revealLeaf(leaf);
 	}
 
 	private openNotistSymbols(): void {
@@ -1084,7 +1120,9 @@ export default class NotistPlugin extends Plugin {
 		return this.app.vault.create(candidate, "");
 	}
 
-	private scheduleLayoutSave(): void {
+	/** Debounced layout snapshot; public because views with view-level state
+	 * (explorer expansion) call it so getState() is re-saved promptly. */
+	scheduleLayoutSave(): void {
 		if (this.switching) return;
 		if (this.layoutSaveTimer !== null) window.clearTimeout(this.layoutSaveTimer);
 		this.layoutSaveTimer = window.setTimeout(() => {

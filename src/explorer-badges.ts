@@ -21,8 +21,8 @@ function toneOf(counts: SeverityCounts): BadgeTone {
  * Diagnostic badges in the shared native file explorer.
  *
  * Both worlds reuse Obsidian's native explorer (CSS-filtered), so decorating
- * its DOM once covers Markdown World and Notist World alike — the deleted
- * experimental `notist-explorer` does not exist anymore (purged on load).
+ * its DOM once covers Markdown World and Notist World alike — independent of
+ * the command-only `notist-explorer` placeholder view.
  *
  * Mechanism: a MutationObserver over `.nav-files-container` re-applies badges
  * whenever the tree re-renders (collapse/expand/rename/filter). Applying is

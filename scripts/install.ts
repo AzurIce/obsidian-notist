@@ -4,7 +4,7 @@
  * Default: copy the built artifacts (committable, self-contained vault).
  * --link:  symlink the whole repo directory instead (live dev loop).
  *
- * Usage: bun run install [--link] <vault-path>
+ * Usage: bun run sync [--link] <vault-path>  (runs build first; copies artifacts)
  */
 import {
 	copyFileSync,
@@ -30,7 +30,7 @@ const args = process.argv.slice(2);
 const link = args.includes("--link");
 const vaultArg = args.find((a) => a !== "--link");
 if (!vaultArg) {
-	console.error("usage: bun run install [--link] <vault-path>");
+	console.error("usage: bun run sync [--link] <vault-path>");
 	process.exit(1);
 }
 const vault = resolve(vaultArg.replace(/^~/, process.env.HOME ?? "~"));

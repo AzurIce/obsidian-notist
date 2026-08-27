@@ -9,7 +9,6 @@
 	"scripts": {
 		"dev": "bun run esbuild.config.mjs",
 		"build": "bun x tsc -noEmit -skipLibCheck && bun run esbuild.config.mjs production",
-		"install": "bun run scripts/install.ts",
 		"sync": "bun run build && bun run scripts/install.ts"
 	},
 	"devDependencies": {

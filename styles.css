@@ -355,45 +355,211 @@ body.md-world .workspace-leaf-content[data-type="notist-outgoing-links"] {
 	display: none;
 }
 
+/* Guardrail: the explorer leaf is detached on world switch; this only covers
+   the transient window before that happens. */
+body.md-world .workspace-leaf-content[data-type="notist-explorer"] {
+	display: none;
+}
+
+/* ---- Notist explorer ---- */
+
+.notist-explorer {
+	padding: var(--size-4-2);
+}
+
+/* The header is the sticky toolbar; kill the scroll container's top padding
+   so nothing peeks out above it once it docks. */
+.workspace-leaf-content[data-type="notist-explorer"] .view-content {
+	padding-top: 0;
+}
+
+.notist-explorer-header {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	display: flex;
+	justify-content: flex-end;
+	align-items: center;
+	gap: var(--size-2-1);
+	margin: calc(-1 * var(--size-4-2)) calc(-1 * var(--size-4-2)) var(--size-4-1);
+	padding: var(--size-4-2) var(--size-4-2) var(--size-2-2);
+	/* Blend with the sidebar pane (--background-secondary); an opaque
+	   editor-white here read as a floating strip over the tree. */
+	background: var(--background-secondary);
+}
+
+/* Filter-style toggles: recoloring the icon is the whole pressed cue. */
+.notist-explorer-header .clickable-icon.is-toggled {
+	color: var(--text-accent);
+}
+
+.notist-explorer-row.is-dimmed > .notist-explorer-icon,
+.notist-explorer-row.is-dimmed > .notist-explorer-chevron,
+.notist-explorer-row.is-dimmed > .notist-explorer-label {
+	color: var(--text-faint);
+}
+
+.notist-explorer-empty {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.notist-explorer-tree {
+	outline: none;
+	min-height: 100%;
+	--notist-row-h: 24px;
+	--notist-indent: 14px;
+}
+
+.notist-explorer-children {
+	margin-left: 12px;
+	border-left: 1px solid color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+}
+
+.notist-explorer-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	height: var(--notist-row-h);
+	padding-left: calc(var(--size-4-1) + var(--notist-depth) * var(--notist-indent));
+	padding-right: var(--size-4-2);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	user-select: none;
+	transition: background-color 80ms ease;
+}
+
+.notist-explorer-row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.notist-explorer-row.is-dragged {
+	opacity: 0.45;
+}
+
+/* Drop feedback: thin accent frame + faint wash, folder or root alike. */
+.notist-explorer-row.is-drop-target,
+.notist-explorer-tree.is-root-drop-target {
+	box-shadow: inset 0 0 0 1px rgba(var(--interactive-accent-rgb, 124, 77, 255), 0.55);
+	background-color: rgba(var(--interactive-accent-rgb, 124, 77, 255), 0.07);
+}
+
+/* Full-height cells with internal centering: glyph positions stop depending
+   on the row font's ascent/descent quirks, keeping every child on one axis. */
+.notist-explorer-chevron,
+.notist-explorer-icon {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 100%;
+	color: var(--text-muted);
+}
+
+.notist-explorer-chevron svg {
+	width: 12px;
+	height: 12px;
+	stroke-width: 2.4;
+	transition: transform 100ms ease;
+}
+
+.notist-explorer-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.notist-explorer-row[aria-expanded="true"] > .notist-explorer-chevron svg {
+	transform: rotate(90deg);
+}
+
+.notist-explorer-label {
+	min-width: 0;
+	flex: 0 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	line-height: var(--notist-row-h);
+}
+
+/* Badges form a right-edge rail so they sit at one predictable spot and the
+   row's free space never wedges between label and pill. (The base chip rule
+   below carries margin-left:auto; this exists only as documentation of the
+   intent for the tree rows.) */
+
+.notist-explorer-rename {
+	flex: 1;
+	min-width: 0;
+	height: 22px;
+	padding: 0 4px;
+	font-size: var(--font-ui-small);
+	border: none;
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	box-shadow: 0 1px 0 0 var(--interactive-accent);
+}
+
+.notist-explorer-rename:focus {
+	outline: none;
+	box-shadow: 0 1px 0 0 var(--interactive-accent);
+}
+
+/* Delete confirmation */
+.notist-confirm-body {
+	color: var(--text-muted);
+}
+.notist-confirm-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-2-2);
+	margin-top: var(--size-4-2);
+}
+
 /* ---- File-explorer diagnostic badges ---- */
 
 /* Pill rendered inside .tree-item-self after the label; captures mousedown /
-   click so badge clicks never open the file. Folders aggregate descendants. */
+   click so badge clicks never open the file. Folders aggregate descendants.
+   Flat compact chip: no ring, tight radius, quiet fill so a busy tree stays
+   calm even with heavy error counts. */
 .nav-file-title .notist-nav-badge,
-.nav-folder-title .notist-nav-badge {
+.nav-folder-title .notist-nav-badge,
+.notist-explorer-row .notist-nav-badge {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	flex: none;
+	min-width: 18px;
+	height: 16px;
+	padding: 0 5px;
 	margin-left: auto;
-	min-width: 1rem;
-	height: 1rem;
-	padding: 0 var(--size-2-1);
-	border-radius: 999px;
+	border-radius: 4px;
 	font-family: var(--font-interface);
 	font-size: var(--font-smallest);
+	font-weight: 550;
 	font-variant-numeric: tabular-nums;
-	line-height: 1;
+	line-height: 16px;
+	letter-spacing: 0.01em;
 	user-select: none;
 	cursor: pointer;
 }
 
+.notist-nav-badge:hover {
+	filter: brightness(1.08);
+}
+
 .notist-nav-badge.is-error {
-	color: var(--color-red, var(--text-error));
-	background-color: color-mix(in srgb, var(--color-red, red) 16%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-red, red) 35%, transparent);
+	color: color-mix(in srgb, var(--color-red, var(--text-error)) 82%, var(--text-normal));
+	background-color: color-mix(in srgb, var(--color-red, red) 13%, transparent);
 }
 
 .notist-nav-badge.is-warning {
-	color: var(--color-orange);
-	background-color: color-mix(in srgb, var(--color-orange) 16%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-orange) 35%, transparent);
+	color: color-mix(in srgb, var(--color-orange) 82%, var(--text-normal));
+	background-color: color-mix(in srgb, var(--color-orange) 14%, transparent);
 }
 
 .notist-nav-badge.is-info {
-	color: var(--color-blue);
-	background-color: color-mix(in srgb, var(--color-blue) 13%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-blue) 30%, transparent);
+	color: color-mix(in srgb, var(--color-blue) 80%, var(--text-normal));
+	background-color: color-mix(in srgb, var(--color-blue) 11%, transparent);
 }
 
 /* ---- Notist semantic panels ---- */

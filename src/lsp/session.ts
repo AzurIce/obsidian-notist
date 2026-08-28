@@ -95,8 +95,7 @@ export class NotistLspSession {
 	private stderrTail = "";
 
 	constructor(
-		private binaryPath: string,
-		private binaryArgs: string[],
+		private argv: string[],
 		private vaultRoot: string,
 		private handlers: LspSessionHandlers,
 	) {}
@@ -115,9 +114,10 @@ export class NotistLspSession {
 		this.stopping = false;
 		this.stderrTail = "";
 		this.setState("starting");
+		const [command = "notist", ...args] = this.argv;
 		const transport = new LspTransport(
-			this.binaryPath,
-			this.binaryArgs,
+			command,
+			args,
 			{
 				onNotification: (method, params) => this.onNotification(method, params),
 				onExit: (code, signal) => {

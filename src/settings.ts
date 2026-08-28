@@ -56,41 +56,44 @@ export class NotistSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("notist binary path")
+			.setName("notist command")
 			.setDesc(
-				"Command or absolute path used to start the language server " +
-					"(default: `notist` from PATH).",
+				"Command used to invoke the notist CLI — the plugin appends the " +
+					"subcommand itself (`lsp` for the language server; the same " +
+					"command will back future `build` etc. calls). Whitespace-" +
+					"separated, quote parts that contain spaces; not a shell (`~`, " +
+					"$VAR and globs stay literal). Default: `notist`. The server " +
+					"runs with the vault as its working directory; launchers that " +
+					"need their own cwd say so in the command — e.g. dev build: " +
+					"`nix develop /path/to/notist -c cargo run --manifest-path " +
+					"/path/to/notist/Cargo.toml`. A `--` before the subcommand is " +
+					"inserted automatically for wrapper launchers (`nix`, `cargo`, " +
+					"`npm`, …) unless the command already contains one.",
 			)
 			.addText((text) =>
 				text
-					.setValue(this.plugin.data.lspBinaryPath)
+					.setValue(this.plugin.data.notistCommand)
 					.onChange(
 						debounce(async (value: string) => {
-							await this.plugin.setLspBinaryPath(value.trim() || "notist");
+							await this.plugin.setNotistCommand(value.trim() || "notist");
 						}, 800),
 					),
 			);
 
 		new Setting(containerEl)
-			.setName("notist binary arguments")
+			.setName("notist extra arguments")
 			.setDesc(
-				"Full argv after the binary, space-separated (Zed-style: this " +
-					"replaces the whole argument list, so it must include the " +
-					"`lsp` subcommand). Default: `lsp`. The server runs with " +
-					"the vault as its working directory; launchers that need " +
-					"their own cwd must say so in argv — e.g. dev build: path " +
-					"`nix`, arguments `develop /path/to/notist -c cargo run " +
-					"--manifest-path /path/to/notist/Cargo.toml -- lsp`.",
+				"Appended after the subcommand on every invocation (the language " +
+					"server runs `… lsp`). Example: `--no-daemon` embeds the service " +
+					"in the server process instead of the shared per-vault daemon. " +
+					"Default: empty.",
 			)
 			.addText((text) =>
 				text
-					.setValue(this.plugin.data.lspBinaryArgs.join(" "))
+					.setValue(this.plugin.data.notistExtraArgs)
 					.onChange(
 						debounce(async (value: string) => {
-							const args = value.trim().split(/\s+/).filter(Boolean);
-							await this.plugin.setLspBinaryArgs(
-								args.length ? args : ["lsp"],
-							);
+							await this.plugin.setNotistExtraArgs(value.trim());
 						}, 800),
 					),
 			);

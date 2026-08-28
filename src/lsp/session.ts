@@ -2,11 +2,16 @@
  * LSP session: lifecycle, document registry, and request wrappers for one
  * `notist lsp` process covering the whole vault.
  *
- * Server contract this relies on (crates/notist-cli/src/lsp.rs @ 39f6086):
+ * Server contract this relies on (crates/notist-cli/src/lsp.rs @ f44c247):
  * - FULL sync, strictly: didChange carries exactly one range-less change
  *   carrying the full text; document versions must be monotonic. Violations
  *   are rejected with only a server-side stderr log — no client feedback —
  *   so the sending discipline here is the only guard.
+ * - Position encoding is negotiated from general.positionEncodings; this
+ *   client offers utf-16 and the server picks utf-16 when offered (or by
+ *   default), so offsets stay UTF-16 code units either way.
+ * - Completion trigger characters include "<" and "/" so module-path
+ *   completion re-fires inside `#<path/label>` targets and import paths.
  * - Diagnostics are pushed: a baseline right after initialize, then deltas
  *   (unchanged files are not republished; cleared files get an empty set).
  * - Experimental `notist/documentReferences` (declared under

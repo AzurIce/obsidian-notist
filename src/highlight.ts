@@ -1,4 +1,9 @@
-import { RangeSetBuilder, StateField, type Extension } from "@codemirror/state";
+import {
+	RangeSetBuilder,
+	StateField,
+	type EditorState,
+	type Extension,
+} from "@codemirror/state";
 import type { Text, Transaction } from "@codemirror/state";
 import {
 	Decoration,
@@ -67,6 +72,40 @@ export function deinitNotistHighlight(): void {
 	parser?.delete();
 	query = null;
 	parser = null;
+}
+
+export interface NotistTargetSpan {
+	/** Whole `#<...>` literal, in UTF-16 code units (CM positions). */
+	from: number;
+	to: number;
+	/** Body between the delimiters with target escapes (`\<` `\>` `\\`)
+	 * resolved. */
+	target: string;
+}
+
+/**
+ * The `#<...>` target literal covering `pos`, read from the live parse tree
+ * the highlight field maintains (no reparse). Null when highlighting failed
+ * to init or `pos` sits outside any target literal.
+ */
+export function targetLiteralAt(
+	state: EditorState,
+	pos: number,
+): NotistTargetSpan | null {
+	const tree = state.field(highlightField, false)?.tree;
+	if (!tree) return null;
+	let node: Node | null = tree.rootNode.descendantForIndex(pos, pos);
+	while (node && node.type !== "target_literal") node = node.parent;
+	if (!node || pos < node.startIndex || pos >= node.endIndex) return null;
+	const body = node.childForFieldName("target");
+	if (!body) return null;
+	return {
+		from: node.startIndex,
+		to: node.endIndex,
+		target: state.doc
+			.sliceString(body.startIndex, body.endIndex)
+			.replace(/\\([<>\\])/g, "$1"),
+	};
 }
 
 /** CM extension for one editor; empty when highlighting failed to init. */

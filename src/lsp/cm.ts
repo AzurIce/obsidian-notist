@@ -21,6 +21,8 @@ import {
 	type CompletionResult,
 } from "@codemirror/autocomplete";
 import type { NotistLspSession } from "./session";
+import { targetLiteralAt } from "../highlight";
+import { isImageTargetRef } from "../image-hover";
 import type {
 	LspDiagnostic,
 	LspLocation,
@@ -131,6 +133,10 @@ export function notistLsp(hooks: LspCmHooks): Extension {
 	};
 
 	const hover = hoverTooltip(async (view, pos) => {
+		// Image references get a native HoverPopover preview instead
+		// (notist-view.ts); don't stack the text tooltip on top of it.
+		const literal = targetLiteralAt(view.state, pos);
+		if (literal && isImageTargetRef(literal.target)) return null;
 		const session = hooks.session();
 		const path = hooks.path();
 		if (!session || session.state !== "ready" || !path) return null;

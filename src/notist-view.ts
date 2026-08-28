@@ -1,4 +1,6 @@
 import {
+	HoverParent,
+	HoverPopover,
 	Notice,
 	TFile,
 	TextFileView,
@@ -18,6 +20,7 @@ import {
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { getCM, vim } from "@replit/codemirror-vim";
 import { notistHighlight } from "./highlight";
+import { notistImageHover, isImageExtension, type ImageRefHover } from "./image-hover";
 import {
 	applyLspDiagnostics,
 	offsetFromPos,
@@ -38,7 +41,7 @@ export const VIEW_TYPE_NOTIST = "notist-view";
  * Vim keybindings are optional (plugin setting), toggled live via a
  * Compartment so open editors pick the change up without a reload.
  */
-export class NotistTextView extends TextFileView {
+export class NotistTextView extends TextFileView implements HoverParent {
 	/**
 	 * Vim normal/visual mode runs with contenteditable off so the OS never
 	 * routes keystrokes to the IME (IMEs only engage editable contexts).
@@ -47,6 +50,15 @@ export class NotistTextView extends TextFileView {
 	 * element blurs it in Chrome).
 	 */
 	private static vimNonEditable: Extension = EditorView.editable.of(false);
+
+	/** HoverParent contract: the popover itself assigns this in onShow and
+	 * clears it in onHide — never write it from the view side, or onShow's
+	 * "hide the previous popover" step will hide our own popover at show
+	 * time (observed: constructed, img inside, never attached to the DOM). */
+	hoverPopover: HoverPopover | null = null;
+	/** Our own bookkeeping for the image preview, safe to replace/hide
+	 * freely (may still be in its pre-show wait when the pointer moves on). */
+	private imagePopover: HoverPopover | null = null;
 
 	private titleInputEl: HTMLInputElement | null = null;
 	private editorView: EditorView | null = null;
@@ -122,6 +134,10 @@ export class NotistTextView extends TextFileView {
 					keymap.of([...defaultKeymap, ...historyKeymap]),
 					// tree-sitter highlighting; [] when wasm init failed.
 					notistHighlight(),
+					// Image-reference hover previews (shell glue below).
+					notistImageHover({
+						show: (hover) => this.showImageHover(hover),
+					}),
 					// LSP (diagnostics/completion/hover/definition); [] when
 					// the server is disabled or failed to start.
 					this.lspCompartment.of(this.plugin.lspExtension(this)),
@@ -159,11 +175,95 @@ export class NotistTextView extends TextFileView {
 
 	async onClose(): Promise<void> {
 		this.plugin.lspViewClosed(this);
+		this.hideImagePopover();
 		this.editorView?.destroy();
 		this.editorView = null;
 		this.editorAdapter = null;
 		this.contentEl.empty();
 		this.titleInputEl = null;
+	}
+
+	/** Hover preview for image resource references (`#<…>.png`): resolve the
+	 * target to a vault image and show it in a native HoverPopover. The
+	 * default waitTime (300ms) matters — it is also the native hide grace,
+	 * so the popover survives pointer jitter instead of vanishing instantly. */
+	private showImageHover(hover: ImageRefHover): void {
+		const file = this.resolveImageReference(hover.target);
+		if (!file) return;
+		this.hideImagePopover();
+		const popover = new HoverPopover(this, hover.targetEl);
+		const img = popover.hoverEl.createEl("img", {
+			cls: "notist-image-hover",
+			attr: { alt: file.name },
+		});
+		img.src = this.app.vault.getResourcePath(file);
+		this.imagePopover = popover;
+	}
+
+	/** Take down the current preview popover. HoverPopover.hide is
+	 * runtime-only (absent from obsidian.d.ts); unload() is the typed
+	 * teardown fallback. Safe on a popover that never showed. */
+	private hideImagePopover(): void {
+		const popover = this.imagePopover;
+		this.imagePopover = null;
+		if (!popover) return;
+		const hide = (popover as { hide?: () => void }).hide;
+		if (typeof hide === "function") hide.call(popover);
+		else popover.unload();
+	}
+
+	/**
+	 * Mirrors notist's authored target grammar (`ModulePath[/ItemName]`; the
+	 * first `/` switches into the flat ItemName space) and module-path
+	 * arithmetic: `vault::…` is vault-root absolute, `self::…` and plain
+	 * segments are relative to the current module's logical path (directory
+	 * + stem, or just the directory for README.not), `super::` walks up.
+	 * Resources live in the target module's directory, and a module path maps
+	 * 1:1 onto a vault directory, so resolution is a vault path lookup.
+	 * Returns null for non-image or unresolvable targets.
+	 */
+	private resolveImageReference(target: string): TFile | null {
+		const body = target.trim();
+		const slash = body.indexOf("/");
+		if (slash < 0) return null; // bare body is a module path, not a resource
+		const name = body.slice(slash + 1).trim();
+		const reference = body.slice(0, slash).trim();
+		const segments = reference.split("::").map((segment) => segment.trim());
+		if (!name || segments.some((segment) => !segment)) return null;
+
+		// Current module logical path (README.not IS the directory module).
+		const docDir = this.file?.parent?.path ?? "";
+		const dirSegments = docDir && docDir !== "/" ? docDir.split("/") : [];
+		const stem = this.file?.basename ?? "";
+		const current =
+			stem.toLowerCase() === "readme"
+				? dirSegments
+				: [...dirSegments, stem];
+
+		let targetSegments: string[];
+		if (segments[0] === "vault") {
+			targetSegments = segments.slice(1);
+		} else if (segments[0] === "self") {
+			targetSegments = [...current, ...segments.slice(1)];
+		} else if (segments[0] === "super") {
+			let levels = 0;
+			while (segments[levels] === "super") levels++;
+			if (levels > current.length) return null;
+			targetSegments = [
+				...current.slice(0, current.length - levels),
+				...segments.slice(levels),
+			];
+		} else {
+			targetSegments = [...current, ...segments];
+		}
+
+		const dirPath = targetSegments.filter(Boolean).join("/");
+		const path = dirPath ? `${dirPath}/${name}` : name;
+		const found = this.app.vault.getAbstractFileByPath(path);
+		if (!(found instanceof TFile) || !isImageExtension(found.extension)) {
+			return null;
+		}
+		return found;
 	}
 
 	/** Route paste through the same extension event used by Markdown views, then

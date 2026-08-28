@@ -204,6 +204,40 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		});
 		img.src = this.app.vault.getResourcePath(file);
 		this.imagePopover = popover;
+		// The text tooltip is suppressed for image refs; its information
+		// (resolved module/label) becomes the popover caption instead.
+		void this.addImagePopoverCaption(popover, hover);
+	}
+
+	/** Fetches the LSP hover text for the reference and shows it above the
+	 * image (server off: falls back to the resolved vault path). No-op if
+	 * the popover was replaced or hidden before the response arrives. */
+	private async addImagePopoverCaption(
+		popover: HoverPopover,
+		hover: ImageRefHover,
+	): Promise<void> {
+		const doc = this.editorView?.state.doc;
+		let text: string | null = null;
+		if (doc) {
+			const info = await this.plugin.lspHover(
+				this,
+				posFromOffset(doc, hover.from),
+			);
+			if (info) {
+				text =
+					typeof info.contents === "string"
+						? info.contents
+						: info.contents.value;
+			}
+		}
+		if (!text) {
+			text = this.resolveResourceReference(hover.target)?.path ?? hover.target;
+		}
+		if (this.imagePopover !== popover) return;
+		const caption = popover.hoverEl.createDiv("notist-image-hover-caption");
+		caption.setText(text);
+		const img = popover.hoverEl.querySelector("img.notist-image-hover");
+		if (img) popover.hoverEl.insertBefore(caption, img);
 	}
 
 	/** Ctrl/Cmd-click on a `#<...>` reference: resource files (images,

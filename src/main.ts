@@ -18,7 +18,7 @@ import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
 import { NotistLspSession, lspPathToUri, lspUriToPath, type LspState } from "./lsp/session";
 import { notistLsp } from "./lsp/cm";
-import type { LspDiagnostic, LspLocation, LspPosition } from "./lsp/protocol";
+import type { LspDiagnostic, LspHover, LspLocation, LspPosition } from "./lsp/protocol";
 
 type World = "md" | "notist";
 
@@ -435,6 +435,14 @@ export default class NotistPlugin extends Plugin {
 		const session = this.lspSession;
 		if (!session || session.state !== "ready" || !view.lspPath) return null;
 		return session.definition(this.lspAbsPath(view.lspPath), position);
+	}
+
+	/** Hover text for a position in one view's document; null when the
+	 * server is off/down. */
+	async lspHover(view: NotistTextView, position: LspPosition): Promise<LspHover | null> {
+		const session = this.lspSession;
+		if (!session || session.state !== "ready" || !view.lspPath) return null;
+		return session.hover(this.lspAbsPath(view.lspPath), position);
 	}
 
 	/** Register a view with the session once its file content is in. */

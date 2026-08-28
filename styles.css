@@ -1267,3 +1267,10 @@ input.notist-title:focus {
 	max-height: 360px;
 	object-fit: contain;
 }
+
+/* Ctrl/Cmd-hover affordance on #<...> references (ref-jump). */
+.cm-notist-ref-jump {
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}

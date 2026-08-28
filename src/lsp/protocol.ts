@@ -44,7 +44,7 @@ export interface LspDocumentReferenceItem {
 	direction: "incoming" | "outgoing";
 	sourceModule: string;
 	targetModule: string;
-	targetLabel?: string | null;
+	targetName?: string | null;
 	/** Outgoing only: "module" | "scope" | "resource". */
 	targetKind?: string | null;
 	url?: string | null;

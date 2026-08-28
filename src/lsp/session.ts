@@ -11,7 +11,7 @@
  *   client offers utf-16 and the server picks utf-16 when offered (or by
  *   default), so offsets stay UTF-16 code units either way.
  * - Completion trigger characters include "<" and "/" so module-path
- *   completion re-fires inside `#<path/label>` targets and import paths.
+ *   completion re-fires inside `#<path/name>` targets and import paths.
  * - Diagnostics are pushed: a baseline right after initialize, then deltas
  *   (unchanged files are not republished; cleared files get an empty set).
  * - Experimental `notist/documentReferences` (declared under

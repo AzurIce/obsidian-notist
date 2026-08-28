@@ -18,7 +18,7 @@ import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
 import { NotistLspSession, lspPathToUri, lspUriToPath, type LspState } from "./lsp/session";
 import { notistLsp } from "./lsp/cm";
-import type { LspDiagnostic, LspLocation } from "./lsp/protocol";
+import type { LspDiagnostic, LspLocation, LspPosition } from "./lsp/protocol";
 
 type World = "md" | "notist";
 
@@ -37,10 +37,12 @@ interface NotistPluginData {
 	vimMode: boolean;
 	/** Spawn `notist lsp` for semantics (desktop only, opt-in). */
 	lspEnabled: boolean;
-	/** Command or absolute path of the notist binary. */
-	lspBinaryPath: string;
-	/** Full argv after the binary (Zed-style整体替换), must include `lsp`. */
-	lspBinaryArgs: string[];
+	/** How to invoke the notist CLI; the plugin appends subcommands
+	 * (`lsp` today, `build` etc. later) and spawns the result. */
+	notistCommand: string;
+	/** Extra flags appended after the subcommand (e.g. `--no-daemon`
+	 * to embed the service in the server process). */
+	notistExtraArgs: string;
 	/** Problems dock expanded across reloads (user preference). */
 	problemsExpanded: boolean;
 }
@@ -62,12 +64,66 @@ const DEFAULT_DATA: NotistPluginData = {
 	layouts: {},
 	vimMode: false,
 	lspEnabled: false,
-	lspBinaryPath: "notist",
-	lspBinaryArgs: ["lsp"],
+	notistCommand: "notist",
+	notistExtraArgs: "",
 	problemsExpanded: false,
 };
 
 const LSP_MAX_RESTARTS = 3;
+
+/** Split a command string into argv on whitespace; "..." and '...' keep
+ * spaces inside one argument. Not a shell: ~, $VAR and globs stay literal. */
+function tokenizeCommand(input: string): string[] {
+	const argv: string[] = [];
+	let token = "";
+	let started = false;
+	let quote: '"' | "'" | null = null;
+	for (const ch of input) {
+		if (quote) {
+			if (ch === quote) quote = null;
+			else token += ch;
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+			started = true;
+		} else if (/\s/.test(ch)) {
+			if (started) {
+				argv.push(token);
+				token = "";
+				started = false;
+			}
+		} else {
+			token += ch;
+			started = true;
+		}
+	}
+	if (started) argv.push(token);
+	return argv;
+}
+
+/** Inverse of tokenizeCommand for one argv element (data migration only). */
+function quoteArg(arg: string): string {
+	if (!/\s/.test(arg)) return arg;
+	return arg.includes('"') ? `'${arg}'` : `"${arg}"`;
+}
+
+/** Wrapper launchers whose trailing arguments only reach the wrapped
+ * program after a `--`. `notist` itself rejects `-- lsp`, so the
+ * separator is inserted only when the command starts with one of these
+ * and contains no `--` yet. */
+const WRAPPER_LAUNCHERS = new Set([
+	"nix",
+	"nix-shell",
+	"cargo",
+	"npm",
+	"pnpm",
+	"yarn",
+	"bun",
+	"deno",
+	"mise",
+	"devbox",
+	"devenv",
+	"asdf",
+]);
 
 const NOTIST_FOREIGN_VIEW_TYPES = [
 	"backlink",
@@ -217,6 +273,8 @@ export default class NotistPlugin extends Plugin {
 			// Guardrail: foreign leaves must never linger in the current
 			// world, including on app start / plugin reload.
 			this.purgeForeignLeaves(this.world);
+			// The explorer is the Notist world's default sidebar tab.
+			if (this.world === "notist") void this.ensureExplorer();
 			const ribbon = document.querySelector(".workspace-ribbon");
 			if (ribbon) {
 				this.ribbonObserver = new MutationObserver(() => this.tagRibbon());
@@ -368,6 +426,17 @@ export default class NotistPlugin extends Plugin {
 		});
 	}
 
+	/** Definition location for a position in one view's document; null when
+	 * the server is off/down or nothing resolves there (callers fall back). */
+	async lspDefinition(
+		view: NotistTextView,
+		position: LspPosition,
+	): Promise<LspLocation | null> {
+		const session = this.lspSession;
+		if (!session || session.state !== "ready" || !view.lspPath) return null;
+		return session.definition(this.lspAbsPath(view.lspPath), position);
+	}
+
 	/** Register a view with the session once its file content is in. */
 	lspViewSync(view: NotistTextView): void {
 		const session = this.lspSession;
@@ -482,6 +551,22 @@ export default class NotistPlugin extends Plugin {
 		for (const listener of this.cursorListeners) listener(cursor);
 	}
 
+	/** Full argv for a notist CLI subcommand — `lsp` today, `build` etc.
+	 * later — reusing the user-configured launcher command and extra
+	 * flags. */
+	private notistArgv(subcommand: string, ...rest: string[]): string[] {
+		const base = tokenizeCommand(this.data.notistCommand);
+		const needsSeparator =
+			!base.includes("--") && WRAPPER_LAUNCHERS.has(base[0] ?? "");
+		return [
+			...base,
+			...(needsSeparator ? ["--"] : []),
+			subcommand,
+			...tokenizeCommand(this.data.notistExtraArgs),
+			...rest,
+		];
+	}
+
 	private async startLsp(): Promise<void> {
 		if (this.lspSession || this.lspStarting) return;
 		this.lspStarting = true;
@@ -504,8 +589,7 @@ export default class NotistPlugin extends Plugin {
 		}
 		this.vaultBasePath = adapter.getBasePath();
 		const session = new NotistLspSession(
-			this.data.lspBinaryPath,
-			this.data.lspBinaryArgs.length ? this.data.lspBinaryArgs : ["lsp"],
+			this.notistArgv("lsp"),
 			this.vaultBasePath,
 			{
 				onDiagnostics: (path, diags) => this.onLspDiagnostics(path, diags),
@@ -589,7 +673,7 @@ export default class NotistPlugin extends Plugin {
 		);
 		const lines = [
 			`State: ${state}`,
-			`Command: ${this.data.lspBinaryPath} ${this.data.lspBinaryArgs.join(" ")}`,
+			`Command: ${this.notistArgv("lsp").join(" ")}`,
 			`Working directory: ${this.vaultBasePath ?? "vault root"}`,
 		];
 		if (detail) lines.push(detail);
@@ -866,14 +950,14 @@ export default class NotistPlugin extends Plugin {
 		}
 	}
 
-	async setLspBinaryPath(path: string): Promise<void> {
-		this.data.lspBinaryPath = path;
+	async setNotistCommand(command: string): Promise<void> {
+		this.data.notistCommand = command;
 		await this.savePluginData();
 		await this.restartLsp();
 	}
 
-	async setLspBinaryArgs(args: string[]): Promise<void> {
-		this.data.lspBinaryArgs = args;
+	async setNotistExtraArgs(args: string): Promise<void> {
+		this.data.notistExtraArgs = args;
 		await this.savePluginData();
 		await this.restartLsp();
 	}
@@ -956,6 +1040,9 @@ export default class NotistPlugin extends Plugin {
 			// Clean again after restore: snapshots saved by earlier versions
 			// may contain foreign leaves, this heals them.
 			this.purgeForeignLeaves(to);
+			// Re-open the default tab before re-snapshotting so the Notist
+			// layout keeps it across switches.
+			if (to === "notist") await this.ensureExplorer();
 			this.data.layouts[to] = this.app.workspace.getLayout();
 			await this.savePluginData();
 		} finally {
@@ -1001,6 +1088,16 @@ export default class NotistPlugin extends Plugin {
 			await rightLeaf.setViewState({ type, active: true });
 		}
 		this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Keep the explorer present as the Notist world's default sidebar
+	 * tab — open it on load and after every world switch if missing. */
+	private async ensureExplorer(): Promise<void> {
+		if (this.world !== "notist") return;
+		if (this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST_EXPLORER).length) {
+			return;
+		}
+		await this.activateExplorer();
 	}
 
 	/** Open the .not file tree in the left sidebar (single reused leaf). */
@@ -1146,6 +1243,25 @@ export default class NotistPlugin extends Plugin {
 
 
 	private async loadPluginData(): Promise<void> {
-		this.data = Object.assign({}, DEFAULT_DATA, await this.loadData());
+		const loaded = (await this.loadData()) as Record<string, unknown> &
+			Partial<NotistPluginData>;
+		// Settings before 2026-08-28 stored binary path + full argv (Zed-style,
+		// with the trailing `lsp` subcommand); fold them into `notistCommand`.
+		const legacyPath = loaded.lspBinaryPath as string | undefined;
+		const legacyArgs = loaded.lspBinaryArgs as string[] | undefined;
+		delete loaded.lspBinaryPath;
+		delete loaded.lspBinaryArgs;
+		this.data = Object.assign({}, DEFAULT_DATA, loaded);
+		if (legacyPath !== undefined || legacyArgs !== undefined) {
+			const args = [...(legacyArgs ?? [])];
+			// The legacy argv had to include the subcommand; drop it wherever
+			// it sits (typically right after a `--` near the end).
+			const sub = args.indexOf("lsp");
+			if (sub !== -1) args.splice(sub, 1);
+			const path = legacyPath?.trim() || DEFAULT_DATA.notistCommand;
+			this.data.notistCommand =
+				[quoteArg(path), ...args].join(" ") || DEFAULT_DATA.notistCommand;
+			await this.savePluginData();
+		}
 	}
 }

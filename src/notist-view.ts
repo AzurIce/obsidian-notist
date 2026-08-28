@@ -21,9 +21,11 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { getCM, vim } from "@replit/codemirror-vim";
 import { notistHighlight } from "./highlight";
 import { notistImageHover, isImageExtension, type ImageRefHover } from "./image-hover";
+import { notistRefJump } from "./ref-jump";
 import {
 	applyLspDiagnostics,
 	offsetFromPos,
+	posFromOffset,
 } from "./lsp/cm";
 import type { LspDiagnostic, LspRange } from "./lsp/protocol";
 import type NotistPlugin from "./main";
@@ -138,6 +140,10 @@ export class NotistTextView extends TextFileView implements HoverParent {
 					notistImageHover({
 						show: (hover) => this.showImageHover(hover),
 					}),
+					// Ctrl/Cmd-click to follow any #<...> reference.
+					notistRefJump({
+						follow: (target, pos) => this.followRef(target, pos),
+					}),
 					// LSP (diagnostics/completion/hover/definition); [] when
 					// the server is disabled or failed to start.
 					this.lspCompartment.of(this.plugin.lspExtension(this)),
@@ -188,8 +194,8 @@ export class NotistTextView extends TextFileView implements HoverParent {
 	 * default waitTime (300ms) matters — it is also the native hide grace,
 	 * so the popover survives pointer jitter instead of vanishing instantly. */
 	private showImageHover(hover: ImageRefHover): void {
-		const file = this.resolveImageReference(hover.target);
-		if (!file) return;
+		const file = this.resolveResourceReference(hover.target);
+		if (!file || !isImageExtension(file.extension)) return;
 		this.hideImagePopover();
 		const popover = new HoverPopover(this, hover.targetEl);
 		const img = popover.hoverEl.createEl("img", {
@@ -198,6 +204,63 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		});
 		img.src = this.app.vault.getResourcePath(file);
 		this.imagePopover = popover;
+	}
+
+	/** Ctrl/Cmd-click on a `#<...>` reference: resource files (images,
+	 * attachments) open directly; everything else goes through the LSP
+	 * definition (module files, headings with range reveal), falling back
+	 * to client-side module-file resolution while the server is off. */
+	private followRef(target: string, pos: number): void {
+		const resource = this.resolveResourceReference(target);
+		if (resource) {
+			void this.app.workspace.getLeaf(false).openFile(resource);
+			return;
+		}
+		void this.followDefinitionRef(target, pos);
+	}
+
+	private async followDefinitionRef(
+		target: string,
+		pos: number,
+	): Promise<void> {
+		const doc = this.editorView?.state.doc;
+		if (doc) {
+			const loc = await this.plugin.lspDefinition(
+				this,
+				posFromOffset(doc, pos),
+			);
+			if (loc) {
+				await this.plugin.openLspLocation(loc);
+				return;
+			}
+		}
+		this.openModuleFallback(target);
+	}
+
+	/** LSP-off fallback for module refs: resolve the module path by the
+	 * D0004 directory layout and open its source file (`dir/stem.not` or
+	 * `dir/README.not`). */
+	private openModuleFallback(target: string): void {
+		const body = target.trim();
+		const slash = body.indexOf("/");
+		const reference = (slash < 0 ? body : body.slice(0, slash)).trim();
+		const segments = this.resolveModuleSegments(reference);
+		if (!segments) {
+			new Notice("Notist: cannot resolve reference target");
+			return;
+		}
+		const dir = segments.filter(Boolean).join("/");
+		const candidates = dir
+			? [`${dir}.not`, `${dir}/README.not`]
+			: ["README.not"];
+		for (const candidate of candidates) {
+			const found = this.app.vault.getAbstractFileByPath(candidate);
+			if (found instanceof TFile) {
+				void this.app.workspace.getLeaf(false).openFile(found);
+				return;
+			}
+		}
+		new Notice("Notist: cannot resolve reference target");
 	}
 
 	/** Take down the current preview popover. HoverPopover.hide is
@@ -212,58 +275,52 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		else popover.unload();
 	}
 
-	/**
-	 * Mirrors notist's authored target grammar (`ModulePath[/ItemName]`; the
-	 * first `/` switches into the flat ItemName space) and module-path
-	 * arithmetic: `vault::…` is vault-root absolute, `self::…` and plain
-	 * segments are relative to the current module's logical path (directory
-	 * + stem, or just the directory for README.not), `super::` walks up.
-	 * Resources live in the target module's directory, and a module path maps
-	 * 1:1 onto a vault directory, so resolution is a vault path lookup.
-	 * Returns null for non-image or unresolvable targets.
-	 */
-	private resolveImageReference(target: string): TFile | null {
-		const body = target.trim();
-		const slash = body.indexOf("/");
-		if (slash < 0) return null; // bare body is a module path, not a resource
-		const name = body.slice(slash + 1).trim();
-		const reference = body.slice(0, slash).trim();
+	/** Resolves a module reference (the `ModulePath` part of a target, `::`-
+	 * separated, with `vault::`/`self::`/`super::` prefixes) into the
+	 * vault-relative directory segments of the target module, mirroring
+	 * notist's `ModuleReference::resolve_from` against this document's
+	 * module path. Null when the reference cannot resolve. */
+	private resolveModuleSegments(reference: string): string[] | null {
 		const segments = reference.split("::").map((segment) => segment.trim());
-		if (!name || segments.some((segment) => !segment)) return null;
-
+		if (segments.some((segment) => !segment)) return null;
 		// Current module logical path (README.not IS the directory module).
 		const docDir = this.file?.parent?.path ?? "";
 		const dirSegments = docDir && docDir !== "/" ? docDir.split("/") : [];
 		const stem = this.file?.basename ?? "";
 		const current =
-			stem.toLowerCase() === "readme"
-				? dirSegments
-				: [...dirSegments, stem];
-
-		let targetSegments: string[];
-		if (segments[0] === "vault") {
-			targetSegments = segments.slice(1);
-		} else if (segments[0] === "self") {
-			targetSegments = [...current, ...segments.slice(1)];
-		} else if (segments[0] === "super") {
+			stem.toLowerCase() === "readme" ? dirSegments : [...dirSegments, stem];
+		if (segments[0] === "vault") return segments.slice(1);
+		if (segments[0] === "self") return [...current, ...segments.slice(1)];
+		if (segments[0] === "super") {
 			let levels = 0;
 			while (segments[levels] === "super") levels++;
 			if (levels > current.length) return null;
-			targetSegments = [
+			return [
 				...current.slice(0, current.length - levels),
 				...segments.slice(levels),
 			];
-		} else {
-			targetSegments = [...current, ...segments];
 		}
+		return [...current, ...segments];
+	}
 
-		const dirPath = targetSegments.filter(Boolean).join("/");
+	/**
+	 * Mirrors notist's authored target grammar (`ModulePath[/ItemName]`; the
+	 * first `/` switches into the flat ItemName space). Resources live in
+	 * the target module's directory, and a module path maps 1:1 onto a
+	 * vault directory, so resolution is a vault path lookup. Returns null
+	 * for non-resource or unresolvable targets.
+	 */
+	private resolveResourceReference(target: string): TFile | null {
+		const body = target.trim();
+		const slash = body.indexOf("/");
+		if (slash < 0) return null; // bare body is a module path, not a resource
+		const name = body.slice(slash + 1).trim();
+		const segments = this.resolveModuleSegments(body.slice(0, slash).trim());
+		if (!name || !segments) return null;
+		const dirPath = segments.filter(Boolean).join("/");
 		const path = dirPath ? `${dirPath}/${name}` : name;
 		const found = this.app.vault.getAbstractFileByPath(path);
-		if (!(found instanceof TFile) || !isImageExtension(found.extension)) {
-			return null;
-		}
-		return found;
+		return found instanceof TFile ? found : null;
 	}
 
 	/** Route paste through the same extension event used by Markdown views, then

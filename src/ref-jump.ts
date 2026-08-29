@@ -25,6 +25,7 @@ const ctrlHoverField = StateField.define<DecorationSet>({
 	create: () => Decoration.none,
 	update(value, tr) {
 		for (const effect of tr.effects) {
+			if (!effect.is(setCtrlHoverRef)) continue;
 			if (effect.value === null) return Decoration.none;
 			const { from, to } = effect.value;
 			return Decoration.set(

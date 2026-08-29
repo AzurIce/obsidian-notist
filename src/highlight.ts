@@ -96,7 +96,9 @@ export function targetLiteralAt(
 	if (!tree) return null;
 	let node: Node | null = tree.rootNode.descendantForIndex(pos, pos);
 	while (node && node.type !== "target_literal") node = node.parent;
-	if (!node || pos < node.startIndex || pos >= node.endIndex) return null;
+	// The double negation also rejects NaN pos (e.g. from posAtCoords on a
+	// hidden view), which passes both plain comparisons.
+	if (!node || !(pos >= node.startIndex && pos < node.endIndex)) return null;
 	const body = node.childForFieldName("target");
 	if (!body) return null;
 	return {

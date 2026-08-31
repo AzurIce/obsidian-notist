@@ -2,14 +2,21 @@
  * LSP session: lifecycle, document registry, and request wrappers for one
  * `notist lsp` process covering the whole vault.
  *
- * Server contract this relies on (crates/notist-cli/src/lsp.rs @ f44c247):
- * - FULL sync, strictly: didChange carries exactly one range-less change
- *   carrying the full text; document versions must be monotonic. Violations
- *   are rejected with only a server-side stderr log — no client feedback —
- *   so the sending discipline here is the only guard.
- * - Position encoding is negotiated from general.positionEncodings; this
- *   client offers utf-16 and the server picks utf-16 when offered (or by
- *   default), so offsets stay UTF-16 code units either way.
+ * Server contract this relies on (crates/notist-cli/src/lsp.rs, 2026-08-30
+ * incremental-sync state):
+ * - INCREMENTAL sync: the server accepts ranged edits and whole-document
+ *   replacements, mixed within one contentChanges array and applied in
+ *   order. This client still sends exactly one range-less change with the
+ *   full text (throttled), which remains valid; versions are informational
+ *   only — the server applies in arrival order and records the latest
+ *   version. Changes for documents that were never didOpen'd are dropped,
+ *   and only URIs that cannot name a vault path log a client-visible
+ *   warning.
+ * - Position encoding is UTF-8 only: the server refuses sessions that do
+ *   not offer utf-8 in general.positionEncodings (this client does). CM6
+ *   positions count UTF-16 code units, so `SourceMap` converts columns at
+ *   the boundary — outgoing positions carry utf-8 byte columns, incoming
+ *   ranges are converted back before leaving this file.
  * - Completion trigger characters include "<" and "/" so module-path
  *   completion re-fires inside `#<path/name>` targets and import paths.
  * - Diagnostics are pushed: a baseline right after initialize, then deltas
@@ -21,11 +28,17 @@
  *   this: its position contract lands on whatever token sits at offset 0,
  *   so documents that open with a heading would resolve to the heading
  *   symbol instead of their module.
+ * - Experimental `notist/renderDocument` (declared under
+ *   capabilities.experimental.notist.renderDocument) renders the module
+ *   OWNING the document to the evaluated HTML fragment the preview site
+ *   would produce; the reply carries the snapshot revision as a freshness
+ *   gate and the module's resource table.
  * - $/cancelRequest is honoured best-effort (real cancellation only in the
  *   server's embedded mode; harmless otherwise).
  * No obsidian imports here; the shell layer lives in main.ts.
  */
 import { LspTransport } from "./transport";
+import { SourceMap } from "./source-map";
 import type {
 	LspCompletionItem,
 	LspCompletionResult,
@@ -36,7 +49,9 @@ import type {
 	LspHover,
 	LspLocation,
 	LspPosition,
+	LspRenderDocumentResult,
 	LspSymbolInformation,
+	LspRange,
 	PublishDiagnosticsParams,
 } from "./protocol";
 
@@ -60,6 +75,9 @@ interface DocEntry {
 	views: number;
 	/** Last text actually sent to the server (didOpen/didChange). */
 	text: string;
+	/** Byte↔column map over `text`: converts wire (utf-8) columns and CM6
+	 * (utf-16) columns at the boundary. */
+	sentMap: SourceMap;
 	/** Newest client-side text while a throttled didChange is pending. */
 	pendingText: string | null;
 	timer: number | null;
@@ -84,6 +102,7 @@ export class NotistLspSession {
 	/** Raw server capabilities captured at initialize. */
 	private serverCapabilities: unknown = null;
 	private supportsDocumentReferencesCache: boolean | null = null;
+	private supportsRenderDocumentCache: boolean | null = null;
 	private transport: LspTransport | null = null;
 	private docs = new Map<string, DocEntry>();
 	private diagnostics = new Map<string, LspDiagnostic[]>();
@@ -152,7 +171,7 @@ export class NotistLspSession {
 					{ uri: lspPathToUri(this.vaultRoot), name: "vault" },
 				],
 				capabilities: {
-					general: { positionEncodings: ["utf-16"] },
+					general: { positionEncodings: ["utf-8"] },
 					textDocument: {
 						publishDiagnostics: {},
 						completion: { completionItem: {} },
@@ -182,6 +201,7 @@ export class NotistLspSession {
 		if (transport) await transport.shutdown().catch(() => undefined);
 		this.serverCapabilities = null;
 		this.supportsDocumentReferencesCache = null;
+		this.supportsRenderDocumentCache = null;
 		this.setState("off");
 	}
 
@@ -203,6 +223,7 @@ export class NotistLspSession {
 			version: 1,
 			views: 1,
 			text,
+			sentMap: SourceMap.fromText(text),
 			pendingText: null,
 			timer: null,
 		});
@@ -272,6 +293,7 @@ export class NotistLspSession {
 			version: 1,
 			views: entry.views,
 			text,
+			sentMap: SourceMap.fromText(text),
 			pendingText: null,
 			timer: null,
 		});
@@ -295,9 +317,11 @@ export class NotistLspSession {
 		const text = entry.pendingText;
 		entry.pendingText = null;
 		entry.text = text;
+		entry.sentMap = SourceMap.fromText(text);
 		this.transport?.notify("textDocument/didChange", {
 			textDocument: { uri: entry.uri, version: entry.version },
-			// FULL sync contract: exactly one change, no range.
+			// Whole-document change (no range): still accepted under the
+			// server's INCREMENTAL sync.
 			contentChanges: [{ text }],
 		});
 	}
@@ -331,12 +355,17 @@ export class NotistLspSession {
 	}
 
 	async hover(path: string, position: LspPosition): Promise<LspHover | null> {
-		return this.positionRequest<LspHover | null>(
+		const hover = await this.positionRequest<LspHover | null>(
 			"hover",
 			path,
 			"textDocument/hover",
 			position,
 		);
+		// Convert after the (flushing) request: the entry's map now matches
+		// the text the server answered over.
+		const sentMap = this.sentMapFor(path);
+		if (!hover?.range || !sentMap) return hover;
+		return { ...hover, range: this.wireRangeToClient(sentMap, hover.range) };
 	}
 
 	async definition(
@@ -406,6 +435,37 @@ export class NotistLspSession {
 		);
 	}
 
+	/** Whether the experimental single-document render extension is available
+	 * (negotiated once from the stored initialize result). The preview mode
+	 * degrades to a notice when it is not. */
+	supportsRenderDocument(): boolean {
+		if (!this.transport || this.state !== "ready") return false;
+		if (this.supportsRenderDocumentCache === null) {
+			const capabilities = this.serverCapabilities as {
+				experimental?: {
+					notist?: { renderDocument?: unknown };
+				};
+			} | null;
+			this.supportsRenderDocumentCache =
+				capabilities?.experimental?.notist?.renderDocument !== undefined;
+		}
+		return this.supportsRenderDocumentCache;
+	}
+
+	/** Evaluated HTML fragment for the document's owning module. Flushes the
+	 * pending didChange first so the fragment reflects the unsaved buffer;
+	 * null on transport failure/cancellation (superseded renders drop). */
+	async renderDocument(path: string): Promise<LspRenderDocumentResult | null> {
+		const entry = this.docs.get(path);
+		if (!this.transport || !entry || this.state !== "ready") return null;
+		this.flush(path);
+		return this.queryRequest<LspRenderDocumentResult>(
+			`render-document:${path}`,
+			"notist/renderDocument",
+			{ textDocument: { uri: entry.uri } },
+		);
+	}
+
 	async references(
 		path: string,
 		position: LspPosition,
@@ -419,7 +479,10 @@ export class NotistLspSession {
 			"textDocument/references",
 			{
 				textDocument: { uri: entry.uri },
-				position,
+				position: {
+					line: position.line,
+					character: entry.sentMap.utf8ColumnOf(position.line, position.character),
+				},
 				context: { includeDeclaration },
 			},
 		);
@@ -442,7 +505,10 @@ export class NotistLspSession {
 		if (previous !== undefined) transport.cancel(previous);
 		const { id, promise } = transport.requestWithId(method, {
 			textDocument: { uri: entry.uri },
-			position,
+			position: {
+				line: position.line,
+				character: entry.sentMap.utf8ColumnOf(position.line, position.character),
+			},
 		});
 		this.lastRequestId.set(key, id);
 		try {
@@ -501,8 +567,33 @@ export class NotistLspSession {
 		} catch {
 			return;
 		}
-		this.diagnostics.set(path, p.diagnostics);
-		this.handlers.onDiagnostics(path, p.diagnostics);
+		const entry = this.docs.get(path);
+		const diagnostics = entry
+			? p.diagnostics.map((diagnostic) => ({
+					...diagnostic,
+					range: this.wireRangeToClient(entry.sentMap, diagnostic.range),
+				}))
+			: p.diagnostics;
+		this.diagnostics.set(path, diagnostics);
+		this.handlers.onDiagnostics(path, diagnostics);
+	}
+
+	/** Wire (utf-8 byte columns) range → client (utf-16 columns) range.
+	 * Registered docs only: ranges for files the plugin has not opened stay
+	 * in wire units until a consumer reads that file. */
+	private wireRangeToClient(sentMap: SourceMap, range: LspRange): LspRange {
+		return {
+			start: { line: range.start.line, character: sentMap.utf16ColumnOf(range.start.line, range.start.character) },
+			end: { line: range.end.line, character: sentMap.utf16ColumnOf(range.end.line, range.end.character) },
+		};
+	}
+
+	/** The byte↔column map over the last text sent to the server for `path`,
+	 * or null when the document is not open. Consumers of incoming wire
+	 * positions (jumps into files opened on demand) rebuild a map from the
+	 * file text at the point of use. */
+	sentMapFor(path: string): SourceMap | null {
+		return this.docs.get(path)?.sentMap ?? null;
 	}
 
 	private setState(state: LspState, detail?: string): void {

@@ -1,3 +1,4 @@
+import { SourceMap } from "./lsp/source-map";
 import { ItemView, Modal, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type NotistPlugin from "./main";
 import type {
@@ -533,8 +534,16 @@ export class NotistOutgoingLinksView extends NotistReferencesView {
 
 function buildExcerpt(line: string, location: LspLocation): ReferenceExcerpt {
 	const MAX = 120;
-	const start = Math.max(0, location.range.start.character);
-	const end = Math.max(start, location.range.end.character);
+	// Wire character columns are utf-8 bytes; excerpts slice JS strings
+	// (utf-16 units) — convert against the line itself.
+	const start = SourceMap.utf16ColumnInLine(
+		line,
+		Math.max(0, location.range.start.character),
+	);
+	const end = SourceMap.utf16ColumnInLine(
+		line,
+		Math.max(start, location.range.end.character),
+	);
 	const beforeFull = line.slice(0, start);
 	const mark = line.slice(start, end) || line.slice(start, start + 1);
 	const afterFull = line.slice(Math.min(end, line.length));

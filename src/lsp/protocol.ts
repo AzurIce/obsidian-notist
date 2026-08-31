@@ -1,7 +1,8 @@
 /**
  * Minimal LSP 3.17 type surface — only what the notist server speaks
- * (FULL sync, UTF-16 positions, the semantic request methods + push diagnostics).
- * Hand-written to keep the plugin free of protocol dependencies.
+ * (INCREMENTAL sync — this client sends whole-document changes, which the
+ * server still accepts; UTF-16 positions; the semantic request methods + push
+ * diagnostics). Hand-written to keep the plugin free of protocol dependencies.
  */
 
 export interface LspPosition {
@@ -54,6 +55,45 @@ export interface LspDocumentReferenceItem {
 export interface LspDocumentReferencesResult {
 	revision: number;
 	items: LspDocumentReferenceItem[];
+}
+
+/** One rendered heading with its HTML anchor (outline navigation). */
+export interface LspRenderedHeading {
+	level: number;
+	id: string;
+	text: string;
+}
+
+/** One module root binding (compact type/value summary). */
+export interface LspRenderedBinding {
+	name: string;
+	detail: string;
+}
+
+/** One resource file of the rendered module; `sourcePath` is vault-absolute
+ * and maps onto a TFile for `vault.getResourcePath` URL rewriting. */
+export interface LspRenderedResource {
+	moduleSegments: string[];
+	name: string;
+	/** "image" | "file". */
+	kind: string;
+	sourcePath: string;
+}
+
+/** Result of notist/renderDocument: the evaluated HTML fragment of the
+ * document's owning module (same pipeline as the preview site) plus the
+ * module-scoped metadata the preview view needs to compose it. */
+export interface LspRenderDocumentResult {
+	revision: number;
+	page: {
+		moduleSegments: string[];
+		fragment: string;
+		title: string | null;
+		headings: LspRenderedHeading[];
+		bindings: LspRenderedBinding[];
+		source: string | null;
+	};
+	resources: LspRenderedResource[];
 }
 
 /** LSP DiagnosticSeverity: Error=1, Warning=2, Information=3, Hint=4. */

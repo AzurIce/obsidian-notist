@@ -6,6 +6,8 @@ import {
 	TextFileView,
 	WorkspaceLeaf,
 	moment,
+	setIcon,
+	type ViewStateResult,
 	type MarkdownFileInfo,
 } from "obsidian";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
@@ -17,21 +19,40 @@ import {
 	keymap,
 	lineNumbers,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import {
+	defaultKeymap,
+	history,
+	historyKeymap,
+	indentWithTab,
+} from "@codemirror/commands";
 import { getCM, vim } from "@replit/codemirror-vim";
 import { notistHighlight } from "./highlight";
 import { notistImageHover, isImageExtension, type ImageRefHover } from "./image-hover";
 import { notistRefJump } from "./ref-jump";
+import { SourceMap } from "./lsp/source-map";
 import {
 	applyLspDiagnostics,
 	offsetFromPos,
 	posFromOffset,
 } from "./lsp/cm";
-import type { LspDiagnostic, LspRange } from "./lsp/protocol";
+import type { LspDiagnostic, LspRange, LspRenderDocumentResult, LspRenderedResource } from "./lsp/protocol";
 import type NotistPlugin from "./main";
 import { NotistEditorAdapter } from "./editor-adapter";
+import {
+	composePreviewDocument,
+	needsPluginAssets,
+	rewritePreviewLinks,
+	type SiteAssets,
+} from "./preview";
 
 export const VIEW_TYPE_NOTIST = "notist-view";
+
+/** Editor view modes, mirroring MarkdownViewModeType: rendered document vs
+ * source editor inside the same view (mode persists in the leaf state). */
+export type NotistViewMode = "source" | "preview";
+
+/** Trailing debounce for preview re-renders while typing in source mode. */
+const PREVIEW_DEBOUNCE_MS = 500;
 
 /**
  * Plain-text editor for .not files, backed by a minimal CodeMirror 6
@@ -65,7 +86,20 @@ export class NotistTextView extends TextFileView implements HoverParent {
 	private titleInputEl: HTMLInputElement | null = null;
 	private editorView: EditorView | null = null;
 	private editorAdapter: NotistEditorAdapter | null = null;
-	/** Suppresses requestSave and LSP forwarding while setViewData replaces the doc. */
+	/** Current view mode; persisted in the leaf state (getState/setState). */
+	private mode: NotistViewMode = "source";
+	private previewEl: HTMLElement | null = null;
+	private previewFrame: HTMLIFrameElement | null = null;
+	private previewNoticeEl: HTMLElement | null = null;
+	private previewActionEl: HTMLElement | null = null;
+	private previewRenderTimer: number | null = null;
+	/** Guards superseded renders (mode switches, newer revisions). */
+	private previewRenderSeq = 0;
+	/** Revision already on screen; skips redundant re-renders. */
+	private previewRevision: number | null = null;
+	/** Whether the live iframe shell was composed with web-component scripts. */
+	private previewComponentsLoaded = false;
+	/** Suppression for requestSave/LSP forwarding while setViewData replaces the doc. */
 	private settingData = false;
 	private vimCompartment = new Compartment();
 	private editableCompartment = new Compartment();
@@ -80,6 +114,9 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		private plugin: NotistPlugin,
 	) {
 		super(leaf);
+		// New tabs open in the configured default mode; a persisted leaf
+		// state (setState) wins over this once the layout restores.
+		this.mode = plugin.data.defaultViewMode;
 	}
 
 	getViewType(): string {
@@ -110,6 +147,17 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		this.titleInputEl.addEventListener("blur", () => void this.commitTitle());
 
 		const editorWrapEl = this.contentEl.createDiv("notist-editor");
+		// Preview container (hidden while in source mode); the iframe is
+		// created lazily on first render.
+		this.previewEl = this.contentEl.createDiv("notist-preview");
+		this.previewActionEl = this.addAction(
+			this.mode === "source" ? "book-open" : "pencil",
+			this.mode === "source"
+				? "Show rendered document"
+				: "Show source editor",
+			() => this.setMode(this.mode === "source" ? "preview" : "source"),
+		);
+		this.contentEl.toggleClass("notist-mode-preview", this.mode === "preview");
 		const vimMode = this.plugin.data.vimMode;
 		this.editorView = new EditorView({
 			parent: editorWrapEl,
@@ -133,7 +181,9 @@ export class NotistTextView extends TextFileView implements HoverParent {
 					// without it insert mode depends on the flaky native caret.
 					drawSelection(),
 					history(),
-					keymap.of([...defaultKeymap, ...historyKeymap]),
+					// defaultKeymap deliberately omits Tab; without indentWithTab
+					// the browser moves focus out of the editor instead.
+					keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
 					// tree-sitter highlighting; [] when wasm init failed.
 					notistHighlight(),
 					// Image-reference hover previews (shell glue below).
@@ -159,6 +209,7 @@ export class NotistTextView extends TextFileView implements HoverParent {
 						if (update.docChanged && !this.settingData) {
 							this.requestSave();
 							this.plugin.lspDocChanged(this);
+							if (this.mode === "preview") this.schedulePreviewRender();
 						}
 						// Caret tracking for semantic panels (outline highlight).
 						if (!this.settingData && (update.selectionSet || update.docChanged)) {
@@ -177,16 +228,29 @@ export class NotistTextView extends TextFileView implements HoverParent {
 				if (this.file && file.path === this.file.path) this.syncTitle();
 			}),
 		);
+		// Keep the preview iframe's theme in step with Obsidian's.
+		this.registerEvent(
+			this.app.workspace.on("css-change", () => {
+				const doc = this.previewFrame?.contentDocument;
+				if (doc) this.applyPreviewTheme(doc);
+			}),
+		);
 	}
 
 	async onClose(): Promise<void> {
 		this.plugin.lspViewClosed(this);
 		this.hideImagePopover();
+		this.cancelPendingPreviewRender();
+		this.previewRenderSeq++; // drop in-flight renders
 		this.editorView?.destroy();
 		this.editorView = null;
 		this.editorAdapter = null;
 		this.contentEl.empty();
 		this.titleInputEl = null;
+		this.previewEl = null;
+		this.previewFrame = null;
+		this.previewNoticeEl = null;
+		this.previewActionEl = null;
 	}
 
 	/** Hover preview for image resource references (`#<…>.png`): resolve the
@@ -423,6 +487,204 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		this.titleInputEl?.select();
 	}
 
+	// ---- preview mode --------------------------------------------------------
+	// Mirrors MarkdownView's source/preview logic: one view, two panes, the
+	// active one persisted in the leaf state. The preview pane renders the
+	// module's evaluated fragment from notist/renderDocument inside a
+	// same-origin iframe; nothing is re-interpreted client-side.
+
+	getMode(): NotistViewMode {
+		return this.mode;
+	}
+
+	setMode(mode: NotistViewMode): void {
+		if (mode === this.mode) return;
+		this.mode = mode;
+		this.contentEl.toggleClass("notist-mode-preview", mode === "preview");
+		this.updatePreviewAction();
+		if (mode === "preview") {
+			this.schedulePreviewRender();
+		} else {
+			this.cancelPendingPreviewRender();
+			this.previewRenderSeq++; // drop any in-flight render
+		}
+	}
+
+	/** Force a re-render even if the revision looks unchanged (LSP restart). */
+	refreshPreview(): void {
+		this.previewRevision = null;
+		if (this.mode === "preview") this.schedulePreviewRender();
+	}
+
+	private updatePreviewAction(): void {
+		const el = this.previewActionEl;
+		if (!el) return;
+		setIcon(el, this.mode === "source" ? "book-open" : "pencil");
+		el.setAttribute(
+			"aria-label",
+			this.mode === "source" ? "Show rendered document" : "Show source editor",
+		);
+	}
+
+	/** The mode rides the leaf state (like MarkdownView's `mode`), so it
+	 * survives layout saves, world switches and app restarts. */
+	getState(): Record<string, unknown> {
+		return { ...super.getState(), mode: this.mode };
+	}
+
+	setState(state: unknown, result: ViewStateResult): Promise<void> {
+		const savedMode = (state as { mode?: unknown } | null)?.mode;
+		return super.setState(state, result).then(() => {
+			if (savedMode === "preview" || savedMode === "source") {
+				this.setMode(savedMode);
+			}
+		});
+	}
+
+	private schedulePreviewRender(): void {
+		if (this.previewRenderTimer !== null) window.clearTimeout(this.previewRenderTimer);
+		this.previewRenderTimer = window.setTimeout(() => {
+			this.previewRenderTimer = null;
+			void this.renderPreview();
+		}, PREVIEW_DEBOUNCE_MS);
+	}
+
+	private cancelPendingPreviewRender(): void {
+		if (this.previewRenderTimer !== null) {
+			window.clearTimeout(this.previewRenderTimer);
+			this.previewRenderTimer = null;
+		}
+	}
+
+	private async renderPreview(): Promise<void> {
+		if (!this.previewEl || !this.file) return;
+		const token = ++this.previewRenderSeq;
+		const session = this.plugin.getLspSession();
+		if (!session || !session.supportsRenderDocument()) {
+			this.showPreviewNotice(
+				session
+					? "Notist: the running language server cannot render documents. Update the notist binary and restart the server."
+					: "Notist: preview needs the Notist language server. Enable it in the plugin settings.",
+			);
+			return;
+		}
+		const result = await session.renderDocument(this.plugin.lspAbsPath(this.file.path));
+		// Superseded/cancelled renders return null too, but only a failure on
+		// the current render reaches here — show it instead of a blank pane.
+		if (token !== this.previewRenderSeq || this.mode !== "preview") return;
+		if (!result) {
+			this.showPreviewNotice(
+				"Notist: rendering failed (the document may not be registered with the language server). Try restarting the server.",
+			);
+			return;
+		}
+		if (result.revision === this.previewRevision) return;
+		const assets = await this.plugin.getSiteAssets();
+		if (!assets) {
+			this.showPreviewNotice(
+				"Notist: site assets are missing (assets/site). Refresh them with `bun run assets:site`.",
+			);
+			return;
+		}
+		if (token !== this.previewRenderSeq || this.mode !== "preview") return;
+		this.hidePreviewNotice();
+		this.previewRevision = result.revision;
+		this.writePreviewFrame(result, assets);
+	}
+
+	/** First render composes the full iframe shell; later ones swap the
+	 * article content in place so scroll position survives. A fragment that
+	 * newly needs web components forces one recomposition (the module
+	 * scripts are baked into the shell). */
+	private writePreviewFrame(result: LspRenderDocumentResult, assets: SiteAssets): void {
+		if (!this.previewEl) return;
+		const needsComponents = needsPluginAssets(result);
+		const doc = this.previewFrame?.contentDocument ?? null;
+		const article = doc?.querySelector("article.notist-document") ?? null;
+		if (doc && article && (this.previewComponentsLoaded || !needsComponents)) {
+			article.innerHTML = result.page.fragment;
+			this.applyPreviewTheme(doc);
+			rewritePreviewLinks(
+				doc,
+				result,
+				(resource) => this.previewResourcePath(resource),
+				(segments) => segments.filter(Boolean).join("/"),
+			);
+			return;
+		}
+		const frame = this.previewEl.createEl("iframe", {
+			cls: "notist-preview-frame",
+			attr: { title: "Rendered document" },
+		});
+		this.previewFrame?.remove();
+		this.previewFrame = frame;
+		this.previewComponentsLoaded = needsComponents;
+		frame.srcdoc = composePreviewDocument(
+			result,
+			assets,
+			this.themeClasses(),
+			needsComponents,
+		);
+		frame.addEventListener("load", () => {
+			const frameDoc = frame.contentDocument;
+			if (!frameDoc) return;
+			this.applyPreviewTheme(frameDoc);
+			rewritePreviewLinks(
+				frameDoc,
+				result,
+				(resource) => this.previewResourcePath(resource),
+				(segments) => segments.filter(Boolean).join("/"),
+			);
+			frameDoc.addEventListener("click", (event) => this.onPreviewClick(event));
+		});
+	}
+
+	private applyPreviewTheme(doc: Document): void {
+		const theme = document.body.classList.contains("theme-light")
+			? "theme-light"
+			: "theme-dark";
+		doc.documentElement?.classList.toggle("theme-light", theme === "theme-light");
+		doc.documentElement?.classList.toggle("theme-dark", theme === "theme-dark");
+		doc.body?.classList.toggle("theme-light", theme === "theme-light");
+		doc.body?.classList.toggle("theme-dark", theme === "theme-dark");
+	}
+
+	/** Module anchors navigate inside Obsidian; in-document anchors and
+	 * rewritten resource links keep their default behavior. */
+	private onPreviewClick(event: MouseEvent): void {
+		const target = event.target as HTMLElement | null;
+		const anchor = target?.closest?.("a[href]");
+		if (!anchor) return;
+		const moduleDir = anchor.getAttribute("data-notist-module");
+		if (moduleDir === null) return;
+		event.preventDefault();
+		this.openModuleFallback(moduleDir);
+	}
+
+	/** Vault-relative vault path (resource file) for `moduleSegments/name`. */
+	private previewResourcePath(resource: LspRenderedResource): string | null {
+		const prefix = resource.moduleSegments.filter(Boolean).join("/");
+		const path = prefix ? `${prefix}/${resource.name}` : resource.name;
+		const file = this.app.vault.getAbstractFileByPath(path);
+		return file instanceof TFile ? this.app.vault.getResourcePath(file) : null;
+	}
+
+	private showPreviewNotice(message: string): void {
+		if (!this.previewEl) return;
+		this.hidePreviewNotice();
+		this.previewNoticeEl = this.previewEl.createDiv("notist-preview-notice");
+		this.previewNoticeEl.setText(message);
+	}
+
+	private hidePreviewNotice(): void {
+		this.previewNoticeEl?.remove();
+		this.previewNoticeEl = null;
+	}
+
+	private themeClasses(): string {
+		return document.body.classList.contains("theme-light") ? "theme-light" : "theme-dark";
+	}
+
 	/** Toggle vim keybindings live (called from the settings tab). */
 	setVimMode(enabled: boolean): void {
 		if (!this.editorView) return;
@@ -514,6 +776,9 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		// File content arrives here after open; safe point to register the
 		// document with the LSP session (no-op when already registered).
 		this.plugin.lspViewSync(this);
+		// External edits (save echoes of the hidden editor, sync, git) must
+		// reach the preview too.
+		if (this.mode === "preview") this.schedulePreviewRender();
 	}
 
 	/** Hot-swap the LSP extension (called when the server starts/stops). */
@@ -528,12 +793,17 @@ export class NotistTextView extends TextFileView implements HoverParent {
 		if (this.editorView) applyLspDiagnostics(this.editorView, diagnostics);
 	}
 
-	/** Reveal a definition target range in this editor. */
+	/** Reveal a definition target range in this editor. Wire ranges carry
+	 * utf-8 byte columns — convert them against this document's text (the
+	 * target was opened above, so the doc matches what the server served). */
 	revealLspRange(range: LspRange): void {
 		const view = this.editorView;
 		if (!view) return;
-		const from = offsetFromPos(view.state.doc, range.start);
-		const to = offsetFromPos(view.state.doc, range.end);
+		const map = SourceMap.fromText(view.state.doc.toString());
+		const start = map.position(map.byteAtLine(range.start.line) + range.start.character);
+		const end = map.position(map.byteAtLine(range.end.line) + range.end.character);
+		const from = offsetFromPos(view.state.doc, start);
+		const to = offsetFromPos(view.state.doc, end);
 		view.dispatch({
 			selection: { anchor: from, head: to },
 			effects: EditorView.scrollIntoView(from, { y: "center" }),

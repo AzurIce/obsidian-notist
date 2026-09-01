@@ -79,8 +79,8 @@ export class NotistExplorerView extends ItemView {
 	private renaming = false;
 	private pendingRender = false;
 	private renderQueued = false;
-	/** Folder auto-expand timer while dragging over a collapsed folder. */
-	private dragOpenTimer: number | null = null;
+	/** Collapsed folder pending auto-open while dragging over it. */
+	private dragOpen: { dir: string; timer: number } | null = null;
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -302,7 +302,7 @@ export class NotistExplorerView extends ItemView {
 		tree.setAttribute("role", "tree");
 		tree.setAttribute("tabindex", "0");
 		tree.addEventListener("keydown", (evt) => this.onKeyDown(evt));
-		this.wireRootDropZone(tree);
+		this.wireDropZone(tree);
 		tree.addEventListener("contextmenu", (evt) => {
 			if (evt.target instanceof Element && evt.target.closest(".notist-explorer-row")) return;
 			evt.preventDefault();
@@ -353,12 +353,18 @@ export class NotistExplorerView extends ItemView {
 	}
 
 	private renderNode(parent: HTMLElement, node: TreeNode): void {
-		const isOpen = node.isFolder && this.expanded.has(node.path);
-		const row = this.renderRow(parent, node, { open: isOpen });
-		if (!node.isFolder) return;
+		if (!node.isFolder) {
+			this.renderRow(parent, node);
+			return;
+		}
+		const isOpen = this.expanded.has(node.path);
+		// One wrapper per folder so its row and its children block share a
+		// single box — that box is the region lit up as the drop target.
+		const wrap = parent.createDiv("notist-explorer-node");
+		const row = this.renderRow(wrap, node, { open: isOpen });
 		row.setAttribute("aria-expanded", String(isOpen));
 		if (!isOpen) return;
-		const childrenHost = parent.createDiv("notist-explorer-children");
+		const childrenHost = wrap.createDiv("notist-explorer-children");
 		for (const child of node.children) this.renderNode(childrenHost, child);
 	}
 
@@ -530,6 +536,7 @@ export class NotistExplorerView extends ItemView {
 		);
 		if (folder) {
 			menu.addSeparator();
+			this.addCopyPathItems(menu, folder.path);
 			menu.addItem((item) =>
 				item.setTitle("Rename").setIcon("pencil").onClick(() => this.beginRename(folder.path)),
 			);
@@ -545,6 +552,76 @@ export class NotistExplorerView extends ItemView {
 			);
 		}
 		menu.showAtMouseEvent(evt);
+	}
+
+	/** The file's canonical Notist ModulePath (`vault::a::b`): directory
+	 * segments plus the file stem, except README.not which *is* its directory's
+	 * module. Null for files that are not .not modules. */
+	private modulePathOf(file: TFile): string | null {
+		if (file.extension !== "not") return null;
+		const dir = file.parent?.path ?? "";
+		const segments = dir && dir !== "/" ? dir.split("/") : [];
+		if (file.basename.toLowerCase() !== "readme") segments.push(file.basename);
+		return ["vault", ...segments].join("::");
+	}
+
+	/** Native-style "Copy path" group: Notist ModulePath, vault-relative and
+	 * absolute variants. When Obsidian's section submenus are available the
+	 * short titles read as continuations of "Copy path", exactly like its own
+	 * explorer menu; older builds fall back to flat, self-contained items.
+	 * Vault paths are copied verbatim — markdown files (which Obsidian copies
+	 * extension-less) never appear in this tree. */
+	private addCopyPathItems(menu: Menu, path: string, file?: TFile): void {
+		const withSubmenus = menu as Menu & {
+			setSectionSubmenu?(
+				section: string,
+				submenu: { title: string | DocumentFragment; icon?: string },
+			): Menu;
+		};
+		const asSubmenu = typeof withSubmenus.setSectionSubmenu === "function";
+		if (asSubmenu) {
+			withSubmenus.setSectionSubmenu!("info.copy", {
+				title: "Copy path",
+				icon: "lucide-clipboard",
+			});
+		}
+
+		if (file) {
+			const modulePath = this.modulePathOf(file);
+			if (modulePath !== null) {
+				menu.addItem((item) =>
+					item
+						.setTitle(asSubmenu ? "as Notist ModulePath" : "Copy Notist ModulePath")
+						.setIcon("lucide-link")
+						.setSection("info.copy")
+						.onClick(() => this.copyToClipboard(modulePath)),
+				);
+			}
+		}
+
+		menu.addItem((item) =>
+			item
+				.setTitle(asSubmenu ? "from vault folder" : "Copy vault path")
+				.setIcon("vault")
+				.setSection("info.copy")
+				.onClick(() => this.copyToClipboard(path)),
+		);
+
+		if (this.canReachSystem()) {
+			const absolute = `${(this.app.vault.adapter as FileSystemAdapter).getBasePath()}/${path}`;
+			menu.addItem((item) =>
+				item
+					.setTitle(asSubmenu ? "from system root" : "Copy full path")
+					.setIcon("lucide-hard-drive")
+					.setSection("info.copy")
+					.onClick(() => this.copyToClipboard(absolute)),
+			);
+		}
+	}
+
+	private copyToClipboard(text: string): void {
+		void navigator.clipboard.writeText(text);
+		new Notice("Copied to your clipboard");
 	}
 
 	private showFileMenu(node: TreeNode, evt: MouseEvent): void {
@@ -566,6 +643,7 @@ export class NotistExplorerView extends ItemView {
 			);
 		}
 		menu.addSeparator();
+		this.addCopyPathItems(menu, node.path, node.file);
 		menu.addItem((item) =>
 			item.setTitle("Rename").setIcon("pencil").onClick(() => this.beginRename(node.path)),
 		);
@@ -599,6 +677,10 @@ export class NotistExplorerView extends ItemView {
 		const label = row?.querySelector<HTMLElement>(".notist-explorer-label");
 		if (!row || !label) return;
 		this.renaming = true;
+		// The input replaces the label inside the draggable row, so a
+		// text-selection drag in it bubbles a dragstart up and hauls the
+		// file; park row dragging until the rename settles.
+		row.draggable = false;
 
 		const input = document.createElement("input");
 		input.type = "text";
@@ -620,6 +702,7 @@ export class NotistExplorerView extends ItemView {
 			if (finished) return;
 			finished = true;
 			this.renaming = false;
+			row.draggable = true;
 			if (commit) {
 				void this.commitRename(path, input.value.trim());
 				return;
@@ -805,6 +888,38 @@ export class NotistExplorerView extends ItemView {
 	/** Source path of the in-flight drag. The dataTransfer payload is unreadable
 	 * during dragover (spec: types only until drop), so state lives here. */
 	private dragSource: string | null = null;
+	/** Drop region currently lit: the elements and the dir they represent. */
+	private dropLit: { dir: string; els: HTMLElement[] } | null = null;
+
+	private clearDropHighlight(): void {
+		if (!this.dropLit) return;
+		for (const el of this.dropLit.els) {
+			el.removeClass("is-drop-target");
+			el.removeClass("is-root-drop-target");
+		}
+		this.dropLit = null;
+	}
+
+	/** Light the region a drop into `dir` lands in: the whole tree for the
+	 * vault root, otherwise the folder's wrapper box (row + children block). */
+	private lightDropRegion(dir: string): void {
+		if (this.dropLit?.dir === dir && this.dropLit.els.every((el) => el.isConnected)) return;
+		this.clearDropHighlight();
+		let el: HTMLElement | null = null;
+		if (dir) {
+			const row = this.contentEl.querySelector<HTMLElement>(`[data-path="${cssEscape(dir)}"]`);
+			el =
+				row?.parentElement instanceof HTMLElement &&
+				row.parentElement.hasClass("notist-explorer-node")
+					? row.parentElement
+					: row ?? null;
+		} else {
+			el = this.contentEl.querySelector<HTMLElement>(".notist-explorer-tree");
+		}
+		if (!el) return;
+		el.addClass(dir ? "is-drop-target" : "is-root-drop-target");
+		this.dropLit = { dir, els: [el] };
+	}
 
 	private wireDrag(row: HTMLElement, node: TreeNode): void {
 		row.draggable = true;
@@ -817,77 +932,92 @@ export class NotistExplorerView extends ItemView {
 		row.addEventListener("dragend", () => {
 			this.dragSource = null;
 			row.removeClass("is-dragged");
-		});
-
-		if (!node.isFolder) return;
-		row.addEventListener("dragover", (evt) => {
-			const source = this.dragSource;
-			if (!source || source === node.path || node.path.startsWith(`${source}/`)) return;
-			evt.preventDefault();
-			if (evt.dataTransfer) evt.dataTransfer.dropEffect = "move";
-			row.addClass("is-drop-target");
-			// Hovering a collapsed folder long enough peeks it open, like Zed.
-			if (!this.expanded.has(node.path) && this.dragOpenTimer === null) {
-				this.dragOpenTimer = window.setTimeout(() => {
-					this.dragOpenTimer = null;
-					this.expanded.add(node.path);
-					this.render();
-					this.saveExpansion();
-				}, 700);
-			}
-		});
-		row.addEventListener("dragleave", () => {
-			row.removeClass("is-drop-target");
-			if (this.dragOpenTimer !== null) {
-				window.clearTimeout(this.dragOpenTimer);
-				this.dragOpenTimer = null;
-			}
-		});
-		row.addEventListener("drop", (evt) => {
-			evt.preventDefault();
-			row.removeClass("is-drop-target");
-			if (this.dragOpenTimer !== null) {
-				window.clearTimeout(this.dragOpenTimer);
-				this.dragOpenTimer = null;
-			}
-			const source =
-				this.dragSource ?? evt.dataTransfer?.getData("application/x-notist-node") ?? null;
-			this.dragSource = null;
-			if (source && source !== node.path && !node.path.startsWith(`${source}/`)) {
-				void this.moveTo(source, node.path);
-			}
+			this.clearDropHighlight();
+			this.cancelDragOpen();
 		});
 	}
 
-	/** Empty space between/after rows drops into the vault root. */
-	private wireRootDropZone(tree: HTMLElement): void {
+	/** Nearest drop region for a pointer position, as a destination directory:
+	 * a folder row (or anywhere inside its wrapper) takes the drop itself, a
+	 * file row forwards to its parent folder, bare tree space is the root. */
+	private dropDirAt(target: Element): string | null {
+		const row = target.closest<HTMLElement>(".notist-explorer-row");
+		if (row) {
+			const path = row.dataset.path ?? "";
+			return row.dataset.kind === "folder" ? path : this.parentPathOf(path) ?? "";
+		}
+		// Between rows inside a folder's wrapper (indent gutter, stray pixels,
+		// rounded-corner slivers) is still that folder's region — it must not
+		// fall through to the root, or the highlight flips on every crossing.
+		const wrap = target.closest(".notist-explorer-node");
+		const path = wrap?.querySelector<HTMLElement>(":scope > .notist-explorer-row")?.dataset.path;
+		return path !== undefined ? path : "";
+	}
+
+	/** Hovering a collapsed folder long enough peeks it open, like Zed. */
+	private scheduleDragOpen(dir: string): void {
+		if (this.dragOpen?.dir === dir) return;
+		this.cancelDragOpen();
+		if (this.expanded.has(dir)) return;
+		this.dragOpen = {
+			dir,
+			timer: window.setTimeout(() => {
+				this.dragOpen = null;
+				this.expanded.add(dir);
+				this.render();
+				this.lightDropRegion(dir);
+				this.saveExpansion();
+			}, 700),
+		};
+	}
+
+	private cancelDragOpen(): void {
+		if (this.dragOpen) window.clearTimeout(this.dragOpen.timer);
+		this.dragOpen = null;
+	}
+
+	/** True only when dropping `source` into directory `dir` moves anything:
+	 * not onto itself, not into its own subtree, and not back onto the spot it
+	 * already occupies. Name clashes are handled later, in moveTo. */
+	private canDropOn(source: string, dir: string): boolean {
+		if (source === dir) return false;
+		if (dir.startsWith(`${source}/`)) return false;
+		const name = source.slice(source.lastIndexOf("/") + 1);
+		return (dir ? `${dir}/${name}` : name) !== source;
+	}
+
+	/** All pointer feedback is delegated to the tree so crossing row boundaries
+	 * never tears the highlight down mid-flight (clear-on-dragleave + relight
+	 * on the next dragover read as background flicker between items). */
+	private wireDropZone(tree: HTMLElement): void {
 		tree.addEventListener("dragover", (evt) => {
-			if (!this.dragSource) return;
-			if (
-				evt.target instanceof Element &&
-				evt.target.closest('.notist-explorer-row[data-kind="folder"]')
-			) {
-				return; // folder rows handle themselves
-			}
+			const source = this.dragSource;
+			if (!source || !(evt.target instanceof Element)) return;
+			const dir = this.dropDirAt(evt.target);
+			if (dir === null || !this.canDropOn(source, dir)) return;
 			evt.preventDefault();
 			if (evt.dataTransfer) evt.dataTransfer.dropEffect = "move";
-			tree.addClass("is-root-drop-target");
+			this.lightDropRegion(dir);
+			if (dir) this.scheduleDragOpen(dir);
 		});
 		tree.addEventListener("dragleave", (evt) => {
-			if (evt.target === tree) tree.removeClass("is-root-drop-target");
+			const next = evt.relatedTarget;
+			if (!(next instanceof Node) || !tree.contains(next)) {
+				this.clearDropHighlight();
+				this.cancelDragOpen();
+			}
 		});
 		tree.addEventListener("drop", (evt) => {
-			tree.removeClass("is-root-drop-target");
-			if (
-				evt.target instanceof Element &&
-				evt.target.closest('.notist-explorer-row[data-kind="folder"]')
-			) {
-				return; // handled by the folder row
-			}
+			evt.preventDefault();
+			this.cancelDragOpen();
+			this.clearDropHighlight();
 			const source =
 				this.dragSource ?? evt.dataTransfer?.getData("application/x-notist-node") ?? null;
 			this.dragSource = null;
-			if (source) void this.moveTo(source, "");
+			const dir = evt.target instanceof Element ? this.dropDirAt(evt.target) : null;
+			if (source && dir !== null && this.canDropOn(source, dir)) {
+				void this.moveTo(source, dir);
+			}
 		});
 	}
 
@@ -895,7 +1025,13 @@ export class NotistExplorerView extends ItemView {
 		const source = this.app.vault.getAbstractFileByPath(sourcePath);
 		if (!source) return;
 		const name = sourcePath.split("/").pop() ?? sourcePath;
-		const destination = this.nextAvailablePath(targetDir, name);
+		const destination = targetDir ? `${targetDir}/${name}` : name;
+		// Moves never auto-rename: a name clash cancels the move instead of
+		// quietly spawning "name 1" (that suffixing is for creation only).
+		if (this.app.vault.getAbstractFileByPath(destination)) {
+			new Notice(`Notist explorer: "${name}" already exists in the target folder`);
+			return;
+		}
 		try {
 			await this.app.vault.rename(source, destination);
 			this.expanded.add(targetDir);

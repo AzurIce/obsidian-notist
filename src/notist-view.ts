@@ -29,6 +29,7 @@ import { getCM, vim } from "@replit/codemirror-vim";
 import { notistHighlight } from "./highlight";
 import { notistImageHover, isImageExtension, type ImageRefHover } from "./image-hover";
 import { notistRefJump } from "./ref-jump";
+import { notistMultiCursor } from "./multi-cursor";
 import { SourceMap } from "./lsp/source-map";
 import {
 	applyLspDiagnostics,
@@ -190,10 +191,12 @@ export class NotistTextView extends TextFileView implements HoverParent {
 					notistImageHover({
 						show: (hover) => this.showImageHover(hover),
 					}),
-					// Ctrl/Cmd-click to follow any #<...> reference.
-					notistRefJump({
-						follow: (target, pos) => this.followRef(target, pos),
-					}),
+						// Ctrl/Cmd-click to follow any #<...> reference.
+						notistRefJump({
+							follow: (target, pos) => this.followRef(target, pos),
+						}),
+						// Alt+click/alt+drag to add cursors/selection ranges.
+						notistMultiCursor(),
 					// LSP (diagnostics/completion/hover/definition); [] when
 					// the server is disabled or failed to start.
 					this.lspCompartment.of(this.plugin.lspExtension(this)),

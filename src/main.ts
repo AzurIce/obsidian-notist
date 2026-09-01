@@ -18,6 +18,7 @@ import { NotistSettingTab } from "./settings";
 import { deinitNotistHighlight, initNotistHighlight } from "./highlight";
 import { NotistLspSession, lspPathToUri, lspUriToPath, type LspState } from "./lsp/session";
 import { notistLsp } from "./lsp/cm";
+import type { SiteAssets } from "./preview";
 import type { LspDiagnostic, LspHover, LspLocation, LspPosition } from "./lsp/protocol";
 
 type World = "md" | "notist";
@@ -35,6 +36,9 @@ interface NotistPluginData {
 	layouts: Partial<Record<World, unknown>>;
 	/** Vim keybindings in the .not editor. */
 	vimMode: boolean;
+	/** Default mode when a .not file opens in a new tab (mirrors the
+	 * Markdown world's "Default view for new tabs"). */
+	defaultViewMode: "source" | "preview";
 	/** Spawn `notist lsp` for semantics (desktop only, opt-in). */
 	lspEnabled: boolean;
 	/** How to invoke the notist CLI; the plugin appends subcommands
@@ -63,6 +67,7 @@ const DEFAULT_DATA: NotistPluginData = {
 	ribbonKeep: [TOGGLE_RIBBON_LABEL],
 	layouts: {},
 	vimMode: false,
+	defaultViewMode: "source",
 	lspEnabled: false,
 	notistCommand: "notist",
 	notistExtraArgs: "",
@@ -163,6 +168,8 @@ export default class NotistPlugin extends Plugin {
 	private lspTooltipTimer: number | null = null;
 	private lspTooltipText = "";
 	private vaultBasePath: string | null = null;
+	/** Vendored preview site assets; undefined = not loaded yet. */
+	private siteAssetsCache: SiteAssets | null | undefined;
 	private problemsDock: NotistProblemsDock | null = null;
 	private explorerBadges: ExplorerDiagnosticBadges | null = null;
 	/** Outline-style consumers of caret movement inside .not editors. */
@@ -220,6 +227,18 @@ export default class NotistPlugin extends Plugin {
 			id: "toggle-notist-problems",
 			name: "Toggle Notist Problems",
 			callback: () => this.problemsDock?.toggle(),
+		});
+		this.addCommand({
+			id: "toggle-notist-preview",
+			name: "Toggle Notist preview",
+			checkCallback: (checking) => {
+				const view = this.app.workspace.activeLeaf?.view;
+				if (!(view instanceof NotistTextView)) return false;
+				if (!checking) {
+					view.setMode(view.getMode() === "source" ? "preview" : "source");
+				}
+				return true;
+			},
 		});
 		this.addCommand({
 			id: "open-notist-explorer",
@@ -311,6 +330,7 @@ export default class NotistPlugin extends Plugin {
 			}),
 		);
 		this.patchQuickSwitcher();
+		this.patchCommandPalette();
 
 		// In the Notist world the native explorer is reused (CSS-filtered to
 		// hide Markdown while keeping .not and resource files), but "New note"
@@ -403,6 +423,38 @@ export default class NotistPlugin extends Plugin {
 
 	lspAbsPath(vaultRelativePath: string): string {
 		return `${this.vaultBasePath ?? ""}/${vaultRelativePath}`;
+	}
+
+	/** Vendored site assets for the preview iframe (assets/site/, refreshed
+	 * by `bun run assets:site`), loaded lazily and cached per app run. Null
+	 * when missing — preview mode then degrades to a notice. */
+	async getSiteAssets(): Promise<SiteAssets | null> {
+		if (this.siteAssetsCache !== undefined) return this.siteAssetsCache;
+		const adapter = this.app.vault.adapter;
+		const dir = `${this.manifest.dir}/assets/site`;
+		try {
+			const styleCss = await adapter.read(`${dir}/style.css`);
+			const pluginScripts: { name: string; source: string }[] = [];
+			const pluginStyles: { name: string; source: string }[] = [];
+			const pluginsRoot = `${dir}/plugins`;
+			if (await adapter.exists(pluginsRoot)) {
+				const listing = await adapter.list(pluginsRoot);
+				for (const folder of listing.folders) {
+					for (const file of (await adapter.list(folder)).files) {
+						if (file.endsWith(".js")) {
+							pluginScripts.push({ name: file, source: await adapter.read(file) });
+						} else if (file.endsWith(".css")) {
+							pluginStyles.push({ name: file, source: await adapter.read(file) });
+						}
+					}
+				}
+			}
+			this.siteAssetsCache = { styleCss, pluginScripts, pluginStyles };
+		} catch (e) {
+			console.error("Notist: preview site assets unavailable", e);
+			this.siteAssetsCache = null;
+		}
+		return this.siteAssetsCache;
 	}
 
 	/** Current text of an open .not view for `path`, null when not open. */
@@ -787,8 +839,13 @@ export default class NotistPlugin extends Plugin {
 			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTIST)) {
 				const view = leaf.view;
 				if (view instanceof NotistTextView) {
+					// A (re)started session has an empty doc registry; views
+					// opened before the restart still carry lspPath and would
+					// be treated as already registered — force re-registration.
+					view.lspPath = null;
 					view.setLspExtension(this.lspExtension(view));
 					this.lspViewSync(view);
+					view.refreshPreview();
 				}
 			}
 			this.refreshSemanticViews();
@@ -803,6 +860,7 @@ export default class NotistPlugin extends Plugin {
 				if (view instanceof NotistTextView) {
 					view.setLspExtension([]);
 					view.applyLspDiagnostics([]);
+					view.refreshPreview();
 				}
 			}
 			this.refreshProblemsDock();
@@ -1007,6 +1065,13 @@ export default class NotistPlugin extends Plugin {
 		}
 	}
 
+	/** Default mode for .not files opening in a new tab (no live effect on
+	 * already-open views — their mode is persisted per leaf, like Markdown). */
+	async setDefaultViewMode(mode: "source" | "preview"): Promise<void> {
+		this.data.defaultViewMode = mode;
+		await this.savePluginData();
+	}
+
 	/** Tag allowlisted ribbon icons with .notist-ribbon-keep; CSS hides the rest in Notist world. */
 	tagRibbon(): void {
 		const keep = new Set(this.data.ribbonKeep);
@@ -1177,6 +1242,49 @@ export default class NotistPlugin extends Plugin {
 			if (wrappedCheckCallback && command.checkCallback === wrappedCheckCallback) {
 				command.checkCallback = originalCheckCallback;
 			}
+		});
+	}
+
+	/**
+	 * Filter the command palette (ctrl+p) in the Notist world down to this
+	 * plugin's commands, app-level commands (app:*) and the rare
+	 * prefix-less ones — other Markdown-world namespaces (editor:,
+	 * namespaces (editor:, workspace:, graph:, …) stay out. The palette
+	 * modal re-reads getCommands() on every keystroke, so toggling the
+	 * world takes effect immediately; Markdown world and the hotkeys
+	 * settings (which read listCommands directly) are untouched. Internal
+	 * API, restored on unload.
+	 */
+	private patchCommandPalette(): void {
+		const palette = (
+			this.app as unknown as {
+				internalPlugins?: {
+					getPluginById?: (id: string) => {
+						instance?: {
+							getCommands?: () => Array<{ id: string }>;
+						};
+					};
+				};
+			}
+		).internalPlugins?.getPluginById?.("command-palette")?.instance;
+		const original = palette?.getCommands;
+		if (!palette || typeof original !== "function") {
+			console.warn("Notist: cannot filter the command palette; core plugin is unavailable");
+			return;
+		}
+		const wrapped = (): Array<{ id: string }> => {
+			const commands: Array<{ id: string }> = original.call(palette);
+			if (this.world !== "notist") return commands;
+			return commands.filter(
+				(command) =>
+					command.id.startsWith(`${this.manifest.id}:`) ||
+					command.id.startsWith("app:") ||
+					!command.id.includes(":"),
+			);
+		};
+		palette.getCommands = wrapped;
+		this.register(() => {
+			if (palette.getCommands === wrapped) delete palette.getCommands;
 		});
 	}
 

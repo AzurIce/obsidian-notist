@@ -9,7 +9,8 @@
 	"scripts": {
 		"dev": "bun run esbuild.config.mjs",
 		"build": "bun x tsc -noEmit -skipLibCheck && bun run esbuild.config.mjs production",
-		"sync": "bun run build && bun run scripts/install.ts"
+		"sync": "bun run build && bun run scripts/install.ts",
+		"assets:site": "bun run scripts/fetch-site-assets.ts"
 	},
 	"devDependencies": {
 		"@codemirror/autocomplete": "^6.20.3",

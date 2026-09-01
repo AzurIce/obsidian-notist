@@ -41,6 +41,24 @@ export class NotistSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Default view mode")
+			.setDesc("Mode used when a .not file opens in a new tab (the " +
+				"per-tab toggle lives in the tab header).")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOptions({
+						source: "Editing view",
+						preview: "Reading view",
+					})
+					.setValue(this.plugin.data.defaultViewMode)
+					.onChange(async (value) => {
+						await this.plugin.setDefaultViewMode(
+							value === "preview" ? "preview" : "source",
+						);
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Language server (desktop)")
 			.setDesc(
 				"Spawn `notist lsp` for diagnostics, completion, hover and " +

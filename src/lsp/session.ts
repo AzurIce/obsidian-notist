@@ -2,8 +2,8 @@
  * LSP session: lifecycle, document registry, and request wrappers for one
  * `notist lsp` process covering the whole vault.
  *
- * Server contract this relies on (crates/notist-cli/src/lsp.rs, 2026-08-30
- * incremental-sync state):
+ * Server contract this relies on (crates/notist-cli/src/lsp.rs, 2026-09-03
+ * encoding-negotiation state):
  * - INCREMENTAL sync: the server accepts ranged edits and whole-document
  *   replacements, mixed within one contentChanges array and applied in
  *   order. This client still sends exactly one range-less change with the
@@ -12,11 +12,18 @@
  *   version. Changes for documents that were never didOpen'd are dropped,
  *   and only URIs that cannot name a vault path log a client-visible
  *   warning.
- * - Position encoding is UTF-8 only: the server refuses sessions that do
- *   not offer utf-8 in general.positionEncodings (this client does). CM6
+ * - Position encoding is negotiated: utf-8 is preferred — an offer listing
+ *   utf-8 (this client does) gets a utf-8 session; a missing declaration
+ *   (spec default utf-16) or an explicit utf-16 offer gets a utf-16
+ *   session; only an explicit offer listing neither is refused. CM6
  *   positions count UTF-16 code units, so `SourceMap` converts columns at
  *   the boundary — outgoing positions carry utf-8 byte columns, incoming
  *   ranges are converted back before leaving this file.
+ * - Position requests (hover/completion/definition/references) accept an
+ *   optional `expected_fingerprint` for server-side snapshot identity
+ *   checks; mismatches surface as `snapshot_changed:` errors and are
+ *   retried inside the server, so this client neither sends nor handles
+ *   it.
  * - Completion trigger characters include "<" and "/" so module-path
  *   completion re-fires inside `#<path/name>` targets and import paths.
  * - Diagnostics are pushed: a baseline right after initialize, then deltas

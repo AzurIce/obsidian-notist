@@ -2,7 +2,9 @@
  * Byte offset/column ↔ LSP-style {line, character} mapping over one document
  * text.
  *
- * The wire protocol is UTF-8 only (byte columns), while CM6/JS positions count
+ * The wire protocol in this client's sessions uses UTF-8 byte columns (the
+ * client offers utf-8 and the server prefers it; utf-16 sessions exist but
+ * not for this client), while CM6/JS positions count
  * UTF-16 code units — this converts between the two at the plugin↔LSP
  * boundary. Ported from vscode-notist/src/source-map.ts (byte offsets also
  * back the renderer's `data-notist-start`/`-end` attributes); kept free of

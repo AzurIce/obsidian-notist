@@ -427,29 +427,59 @@ export default class NotistPlugin extends Plugin {
 
 	/** Vendored site assets for the preview iframe (assets/site/, refreshed
 	 * by `bun run assets:site`), loaded lazily and cached per app run. Null
-	 * when missing — preview mode then degrades to a notice. */
+	 * when missing — preview mode then degrades to a notice. Plugin JS is
+	 * collected at any depth (blob-module import graph); binary assets are
+	 * turned into blob URLs up front so components can hand wasm/fonts bytes
+	 * across into the iframe. */
 	async getSiteAssets(): Promise<SiteAssets | null> {
 		if (this.siteAssetsCache !== undefined) return this.siteAssetsCache;
 		const adapter = this.app.vault.adapter;
 		const dir = `${this.manifest.dir}/assets/site`;
+		const binaryAsset = /\.(wasm|otf|ttf|woff2?|png|jpe?g|webp|gif|ico|mp3|mp4|pdf)$/i;
 		try {
 			const styleCss = await adapter.read(`${dir}/style.css`);
 			const pluginScripts: { name: string; source: string }[] = [];
+			const modules = new Map<string, string>();
 			const pluginStyles: { name: string; source: string }[] = [];
+			const pluginAssets: { path: string; blobUrl: string }[] = [];
 			const pluginsRoot = `${dir}/plugins`;
 			if (await adapter.exists(pluginsRoot)) {
-				const listing = await adapter.list(pluginsRoot);
-				for (const folder of listing.folders) {
-					for (const file of (await adapter.list(folder)).files) {
-						if (file.endsWith(".js")) {
-							pluginScripts.push({ name: file, source: await adapter.read(file) });
-						} else if (file.endsWith(".css")) {
-							pluginStyles.push({ name: file, source: await adapter.read(file) });
+				// Paths are keyed site-root-relative (`plugins/<pkg>/…`), matching
+				// how the built site references them. A plugin's entry modules and
+				// stylesheets sit directly in `plugins/<pkg>/` (three segments);
+				// deeper files are import-graph nodes and binary assets.
+				const walk = async (abs: string, rel: string): Promise<void> => {
+					const listing = await adapter.list(abs);
+					for (const file of listing.files) {
+						const base = file.split("/").pop() ?? file;
+						const path = `${rel}/${base}`;
+						const isPluginTopLevel = path.split("/").length === 3;
+						if (file.endsWith(".js") || file.endsWith(".mjs")) {
+							const source = await adapter.read(file);
+							modules.set(path, source);
+							if (isPluginTopLevel) pluginScripts.push({ name: path, source });
+						} else if (file.endsWith(".css") && isPluginTopLevel) {
+							pluginStyles.push({ name: path, source: await adapter.read(file) });
+						} else if (binaryAsset.test(base)) {
+							const bytes = await adapter.readBinary(file);
+							pluginAssets.push({ path, blobUrl: URL.createObjectURL(new Blob([bytes])) });
 						}
 					}
-				}
+					for (const rawFolder of listing.folders) {
+						const folder = rawFolder.replace(/\/+$/, "");
+						const base = folder.split("/").pop() ?? folder;
+						await walk(folder, `${rel}/${base}`);
+					}
+				};
+				await walk(pluginsRoot, "plugins");
 			}
-			this.siteAssetsCache = { styleCss, pluginScripts, pluginStyles };
+			this.siteAssetsCache = {
+				styleCss,
+				pluginScripts,
+				pluginModules: [...modules].map(([path, source]) => ({ path, source })),
+				pluginStyles,
+				pluginAssets,
+			};
 		} catch (e) {
 			console.error("Notist: preview site assets unavailable", e);
 			this.siteAssetsCache = null;

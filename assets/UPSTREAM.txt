@@ -1,2 +1,3 @@
-tree-sitter-notist a9a2a69301e03311c7b7d9e17dfaf3cb4bd1c0f8 (2026-09-02)
-built with: tree-sitter build --wasm (CLI-downloaded wasi-sdk)
+tree-sitter-notist @ a77d15c4b1721e22fa379ad98235190dfe4af9cd (math sugar: inline_math + math_block)
+built: 2026-09-08
+refresh via: tree-sitter build --wasm in tree-sitter-notist

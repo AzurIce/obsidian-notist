@@ -3,7 +3,7 @@
 	"name": "Notist",
 	"version": "0.1.0",
 	"minAppVersion": "1.5.0",
-	"description": "Notist World inside Obsidian: isolated world UI, .not file explorer and editing.",
+	"description": "Deprecated: unmaintained and incompatible with the current Notist language and package model.",
 	"author": "notist",
 	"isDesktopOnly": false
 }

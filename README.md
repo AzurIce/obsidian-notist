@@ -1,10 +1,12 @@
 # obsidian-notist
 
+**Deprecated.** This plugin is no longer maintained and does not support the current Notist package model, Markup syntax, or LSP. Use the [Zed extension](https://github.com/AzurIce/zed-notist) or the Notist CLI's `preview` command for current documents.
+
 Notist World inside Obsidian: borrow Obsidian's GUI shell (workspace, file tree, sync), rebuild all semantics on top of notist.
 
 Design notes and decisions live in the notist repo: `docs/obsidian-notist/README.not` and `docs/ai/2026-08-24 obsidian plugin feasibility research.not`.
 
-## Current state (MVP)
+## Archived Implementation
 
 - World switcher: ribbon icon / command / status bar toggles `md` ↔ `notist` world (persisted, body class driven).
 - Independent workspaces: each world keeps its own full layout (panes, tabs, sidebars) via `getLayout()`/`changeLayout()` snapshots, saved on switch and on debounced `layout-change`. The Notist explorer simply does not exist in the Markdown world's layout (CSS hiding remains as a guardrail only).
